@@ -188,4 +188,23 @@ assert k.execute(COUNT).fetchone() == (2, 0)
 k.execute("delete from exams where id = 1")
 assert k.execute(COUNT).fetchone() == (0, 0), "deleting the exam empties its waiting list"
 print("waiting list statements: ok")
+# Reading accuracy and known names (src/lib/db/scripts.ts).
+import re
+ssrc = open("src/lib/db/scripts.ts").read()
+acc_sql = re.search(r"readingAccuracy\(db: SQLiteDatabase\)[^`]*`([^`]*)`", ssrc).group(1)
+names_sql = re.search(r"knownNames\(db: SQLiteDatabase, examId: number\)[^`]*`([^`]*)`", ssrc).group(1)
+k.execute("insert into exams (id, title, question_count, option_count) values (90, 'Acc', 4, 4)")
+k.execute("insert into classes (id, name) values (90, 'Acc class')")
+k.execute("insert into class_names (class_id, full_name) values (90, 'Obi Ada')")
+k.execute("insert into exam_classes (exam_id, class_id) values (90, 90)")
+for q, o in [(1, 'A'), (2, 'B'), (3, 'C'), (4, 'D')]:
+    k.execute("insert into answer_keys (exam_id, question_no, correct_option, marks) values (90, ?, ?, 1)", (q, o))
+k.execute("insert into saved_scripts (id, exam_id, class_id, student_name, subject, written_on, sheet_type, read_by, teacher_fixes) values (900, 90, 90, 'Obi Ada', 'Maths', '2026-11-26', 'handwritten', 'both', 1)")
+for q, c, src in [(1, 'A', 'mlkit'), (2, 'B', 'gemini'), (3, 'D', 'teacher'), (4, 'D', 'mlkit')]:
+    k.execute("insert into saved_answers (script_id, question_no, chosen, source) values (900, ?, ?, ?)", (q, c, src))
+rows = k.execute(acc_sql).fetchall()
+assert ('handwritten', 1, 4, 1) in rows, rows
+names = k.execute(names_sql, (90,)).fetchall()
+assert sorted(names) == [('Obi Ada', 90)], names
+print("reading accuracy and known names: ok")
 print("ALL PHONE DB TESTS PASSED")

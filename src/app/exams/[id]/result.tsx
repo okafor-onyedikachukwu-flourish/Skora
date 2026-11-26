@@ -9,13 +9,17 @@ import { colors, radius, space } from '../../../components/theme';
 import { Banner, Button, Card, Chip, EmptyState, ErrorView, Field, Input, LoadingView, Screen, SectionTitle, confirm } from '../../../components/ui';
 import { getExam, getKey, type Exam, type KeyRow } from '../../../lib/db/exams';
 import { addToQueue, removeFromQueue } from '../../../lib/db/queue';
-import { AlreadySaved, recentSubjects, saveScript, suggestNames, type Chosen } from '../../../lib/db/scripts';
+import { AlreadySaved, knownNames, recentSubjects, saveScript, suggestNames, type Chosen } from '../../../lib/db/scripts';
+import { boxFields, type ReadFields } from '../../../lib/handwriting/parse';
+import { matchNames, matchOption, sureMatch, type NameMatch } from '../../../lib/nameMatch';
+import { readText } from '../../../../modules/skora-text';
 import { friendlyError } from '../../../lib/errors';
 import { formatMarks, lettersFor, today } from '../../../lib/exams';
 import { askGemini, readByOf } from '../../../lib/handwriting/script';
 import { describeAnswer, handwrittenAnswers, type ReadAnswer } from '../../../lib/scan/answers';
 import {
   clearPending,
+  deletePhoto,
   getPending,
   getSaveDefaults,
   releasePending,
@@ -78,9 +82,57 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
     exam.classes.some((c) => c.id === defaults.classId) ? defaults.classId! : (exam.classes[0]?.id ?? 0),
   );
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  /** What Skora read from the script's name box or header, and the students it could be. */
+  const [fromScript, setFromScript] = useState<{ read: string; matches: NameMatch[]; filled: boolean } | null>(null);
+  const typedName = useRef(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const handwritten = pending.sheetType === 'handwritten';
+
+  // Read the student's name (and class and subject) from the script, and fill in the form when
+  // it clearly matches a student Skora knows. Runs after the screen opens, so it never delays it.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      let fields: ReadFields | undefined = pending.fields;
+      const img = pending.fieldsImage;
+      if (!fields && img) {
+        try {
+          const page = await readText(img.uri);
+          if (page) fields = boxFields(page, img.rows);
+        } catch {
+          // Reading the name is a help, not a must.
+        } finally {
+          deletePhoto(img.uri);
+        }
+      }
+      if (!active || !fields) return;
+      const known = await knownNames(db, exam.id);
+      if (!active) return;
+      const examClassIds = new Set(exam.classes.map((c) => c.id));
+      const matches = fields.name ? matchNames(fields.name, known.filter((k) => examClassIds.has(k.classId))) : [];
+      const sure = sureMatch(matches);
+      const fill = !!sure && !typedName.current;
+      if (fill) {
+        setName(sure.name);
+        setClassId(sure.classId);
+      } else if (fields.className) {
+        const cls = matchOption(fields.className, exam.classes.map((c) => c.name));
+        const found = exam.classes.find((c) => c.name === cls);
+        if (found) setClassId(found.id);
+      }
+      if (fields.subject) {
+        const sub = matchOption(fields.subject, subjects);
+        setSubject((current) => (current.trim() ? current : (sub ?? current)));
+      }
+      if (fields.name) setFromScript({ read: fields.name, matches, filled: fill });
+    })().catch(() => undefined);
+    return () => {
+      active = false;
+    };
+    // Only once, when the screen opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -367,8 +419,42 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
       {message ? <Banner tone="danger" icon="alert-circle" title={message} /> : null}
       <Card>
         <Field label="Student's name">
-          <Input value={name} onChangeText={setName} placeholder="As written on the script" autoCapitalize="words" maxLength={120} />
+          <Input
+            value={name}
+            onChangeText={(t) => {
+              typedName.current = true;
+              setName(t);
+            }}
+            placeholder="As written on the script"
+            autoCapitalize="words"
+            maxLength={120}
+          />
         </Field>
+        {fromScript ? (
+          fromScript.filled && name === fromScript.matches[0]?.name ? (
+            <Text style={{ fontSize: 13, color: colors.success, marginTop: -space.sm, marginBottom: space.md }}>
+              {`Read from the script ("${fromScript.read}"). Check it is right.`}
+            </Text>
+          ) : !fromScript.filled ? (
+            <View style={{ marginTop: -space.sm, marginBottom: space.sm }}>
+              <Text style={{ fontSize: 13, color: colors.muted, marginBottom: space.xs }}>
+                {fromScript.matches.length > 0 ? `The script says "${fromScript.read}". Is it one of these?` : `The script says "${fromScript.read}".`}
+              </Text>
+              <View style={styles.chips}>
+                {(fromScript.matches.length > 0 ? fromScript.matches : [{ name: fromScript.read, classId, score: 0 }]).map((m) => (
+                  <Chip
+                    key={`${m.classId}:${m.name}`}
+                    label={m.name}
+                    onPress={() => {
+                      setName(m.name);
+                      if (exam.classes.some((c) => c.id === m.classId)) setClassId(m.classId);
+                    }}
+                  />
+                ))}
+              </View>
+            </View>
+          ) : null
+        ) : null}
         {suggestions.length > 0 ? (
           <View style={styles.chips}>
             {suggestions.map((s) => (

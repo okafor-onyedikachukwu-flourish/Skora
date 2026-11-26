@@ -18,7 +18,7 @@ import { MAX_PAGES, preparePage, readHandwrittenScript, type PreparedPage } from
 import { omrAnswers } from '../../../lib/scan/answers';
 import { deletePhoto, getScanMode, setPending, setScanMode, takeLastSaved, tidyScanPhotos, type ScanMode } from '../../../lib/scan/pending';
 import { loadPhoto, saveGrayJpeg } from '../../../lib/scan/photo';
-import { READ_HINTS, readSheet, straighten } from '../../../lib/scan/read';
+import { READ_HINTS, fieldsImage, readSheet, straighten } from '../../../lib/scan/read';
 import { useSettings } from '../../../lib/settings';
 import { useLoad } from '../../../lib/useLoad';
 
@@ -138,12 +138,16 @@ function Scanner({ exam }: { exam: Exam }) {
     // A straightened copy of the page lets the teacher check unclear answers on the result screen.
     const page = straighten(g, read.toImage, 3);
     const imageUri = await saveGrayJpeg(page, `${randomUUID()}.jpg`, 70);
+    // The name, class and subject boxes, sharp, for the result screen to read and fill in the form.
+    const fields = fieldsImage(g, read.toImage);
+    const fieldsUri = await saveGrayJpeg(fields.gray, `fields-${randomUUID()}.jpg`, 85).catch(() => null);
     setPending({
       examId: exam.id,
       sheetType: 'omr',
       pages: [{ uri: imageUri, width: page.width, height: page.height }],
       answers: omrAnswers(read.answers, exam.questionCount),
       readBy: 'phone',
+      fieldsImage: fieldsUri ? { uri: fieldsUri, rows: fields.rows } : undefined,
     });
     router.push({ pathname: '/exams/[id]/result', params: { id: String(exam.id) } });
   }

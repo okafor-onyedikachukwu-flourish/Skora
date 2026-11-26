@@ -7,6 +7,7 @@ import { colors, space } from '../../components/theme';
 import { UpdateBanner } from '../../components/UpdateBanner';
 import { Banner, Button, Card, Field, Group, Input, ListRow, LoadingView, Screen, SectionTitle, confirm } from '../../components/ui';
 import { listClasses } from '../../lib/db/classes';
+import { readingAccuracy } from '../../lib/db/scripts';
 import { backUp, pickBackup, restore } from '../../lib/db/backup';
 import type { Settings } from '../../lib/db/settings';
 import { friendlyError } from '../../lib/errors';
@@ -31,6 +32,7 @@ function SettingsBody({ settings, justRestored, onRestored }: { settings: Settin
   const db = useSQLiteContext();
   const { update, reload: reloadSettings } = useSettings();
   const classes = useLoad(() => listClasses(db), 'classes');
+  const accuracy = useLoad(() => readingAccuracy(db), 'accuracy');
   const [teacherName, setTeacherName] = useState(settings.teacherName);
   const [schoolName, setSchoolName] = useState(settings.schoolName);
   const [passMark, setPassMark] = useState(String(settings.passMarkPercent));
@@ -153,6 +155,29 @@ function SettingsBody({ settings, justRestored, onRestored }: { settings: Settin
             accessibilityLabel="Gemini for unclear handwriting"
           />
         </View>
+      </Card>
+
+      <SectionTitle>How well Skora reads</SectionTitle>
+      <Card>
+        {accuracy.data && accuracy.data.length > 0 ? (
+          accuracy.data.map((a) => {
+            const right = a.answers > 0 ? Math.floor(((a.answers - a.changed) / a.answers) * 1000) / 10 : 100;
+            return (
+              <View key={a.sheetType} style={{ marginBottom: space.sm }}>
+                <Text style={{ fontSize: 15, fontWeight: '600', color: colors.text }}>
+                  {a.sheetType === 'omr' ? 'Skora sheets' : 'Handwritten scripts'}: {right}% read right
+                </Text>
+                <Text style={{ fontSize: 13, color: colors.muted }}>
+                  {`${a.answers} answers on ${a.scripts} ${a.scripts === 1 ? 'script' : 'scripts'}; you changed ${a.changed}.`}
+                </Text>
+              </View>
+            )
+          })
+        ) : (
+          <Text style={{ fontSize: 14, lineHeight: 20, color: colors.muted }}>
+            Save a few scripts and Skora shows here how many of the answers it read you had to change.
+          </Text>
+        )}
       </Card>
 
       <SectionTitle>Backup</SectionTitle>

@@ -212,3 +212,26 @@ Deno.test("Skora sheet answers", () => {
   const a = omrAnswers("Ab#-", 5);
   assert(a.map((x) => `${x.chosen}${x.unsure ? "?" : ""}`).join(" ") === "A B? several? blank blank", JSON.stringify(a));
 });
+
+import { boxFields, writtenFields } from "../../src/lib/handwriting/parse.ts";
+
+Deno.test("name, class and subject at the top of a script", () => {
+  const p = page([
+    line("NAME: Okafor Ada  CLASS: JSS 2A", 100, 60),
+    line("Subject : Basic Science", 100, 110),
+    line("Date: 26/11/2026", 700, 110),
+    ...column(["1. B", "2. C"], 120, 300),
+  ]);
+  const f = writtenFields(p);
+  assert(f.name === "Okafor Ada" && f.className === "JSS 2A" && f.subject === "Basic Science", JSON.stringify(f));
+  const g = writtenFields(page([line("Name.........Chidi Eze........", 100, 60), ...column(["1. A"], 120, 300)]));
+  assert(g.name === "Chidi Eze" && g.className === undefined, JSON.stringify(g));
+  assert(JSON.stringify(writtenFields(page(column(["1. A", "2. B"], 120, 300)))) === "{}", "no header");
+});
+
+Deno.test("name, class and subject boxes of a Skora sheet", () => {
+  const rows = [{ key: "name" as const, top: 24, bottom: 110 }, { key: "className" as const, top: 134, bottom: 212 }, { key: "subject" as const, top: 236, bottom: 314 }];
+  const p = { width: 934, height: 338, lines: [line("FULL NAME", 10, 30), line("Bello Aisha", 120, 60), line("CLASS", 10, 140), line("SS 1", 100, 165), line("SUBJECT", 10, 240)] };
+  const f = boxFields(p, rows);
+  assert(f.name === "Bello Aisha" && f.className === "SS 1" && f.subject === undefined, JSON.stringify(f));
+});

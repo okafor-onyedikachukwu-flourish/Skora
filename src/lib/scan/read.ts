@@ -1,4 +1,4 @@
-import { MARKERS, ORIENTATION, PAGE, bubbleCentre, gridShape } from '../sheet/layout';
+import { MARKERS, ORIENTATION, PAGE, WRITE_BOXES, bubbleCentre, gridShape } from '../sheet/layout';
 import { homography, project, sample, type Gray, type Homography, type Point } from './geometry';
 import { findCornerMarkers } from './markers';
 
@@ -142,16 +142,79 @@ export function classify(darkness: number[][]): string {
 
 /** The page, straightened and cropped, at `ppm` pixels per millimetre (for checking answers on the result screen). */
 export function straighten(g: Gray, toImage: Homography, ppm = 4): Gray {
-  const width = Math.round(PAGE.width * ppm);
-  const height = Math.round(PAGE.height * ppm);
+  return warpRegion(g, toImage, 0, 0, PAGE.width, PAGE.height, ppm);
+}
+
+/** Part of the page (x, y, w, h in millimetres), straightened, at `ppm` pixels per millimetre. */
+export function warpRegion(g: Gray, toImage: Homography, x0: number, y0: number, w: number, h: number, ppm: number): Gray {
+  const width = Math.round(w * ppm);
+  const height = Math.round(h * ppm);
   const data = new Uint8Array(width * height);
+  // The same as project() then sample() for every pixel, written out in one loop: phones run
+  // JavaScript without a JIT, and a function call and a new array per pixel made this slow.
+  const [h0, h1, h2, h3, h4, h5, h6, h7, h8] = toImage;
+  const src = g.data;
+  const W = g.width;
+  const Hh = g.height;
+  const step = 1 / ppm;
+  const x = x0 + 0.5 * step;
   for (let j = 0; j < height; j++) {
-    for (let i = 0; i < width; i++) {
-      const [px, py] = project(toImage, (i + 0.5) / ppm, (j + 0.5) / ppm);
-      data[j * width + i] = sample(g, px, py);
+    const y = y0 + (j + 0.5) * step;
+    let nx = h0 * x + h1 * y + h2;
+    let ny = h3 * x + h4 * y + h5;
+    let nw = h6 * x + h7 * y + h8;
+    const dx = h0 * step;
+    const dy = h3 * step;
+    const dw = h6 * step;
+    let o = j * width;
+    for (let i = 0; i < width; i++, o++, nx += dx, ny += dy, nw += dw) {
+      const px = nx / nw;
+      const py = ny / nw;
+      if (px < 0 || py < 0 || px > W - 1 || py > Hh - 1) {
+        data[o] = 255;
+        continue;
+      }
+      const x0 = px | 0;
+      const y0 = py | 0;
+      const x1 = x0 + 1 < W ? x0 + 1 : x0;
+      const r0 = y0 * W;
+      const r1 = y0 + 1 < Hh ? r0 + W : r0;
+      const fx = px - x0;
+      const fy = py - y0;
+      const top = src[r0 + x0] + (src[r0 + x1] - src[r0 + x0]) * fx;
+      const bottom = src[r1 + x0] + (src[r1 + x1] - src[r1 + x0]) * fx;
+      data[o] = top + (bottom - top) * fy;
     }
   }
   return { data, width, height };
+}
+
+/** The boxes the student writes their name, class and subject in. */
+export type FieldKey = 'name' | 'className' | 'subject';
+export type FieldsImage = { gray: Gray; rows: { key: FieldKey; top: number; bottom: number }[] };
+
+/**
+ * The name, class and subject boxes of a Skora sheet, cut out sharp and stacked in one picture,
+ * so the phone's text reader reads all three in one go.
+ */
+export function fieldsImage(g: Gray, toImage: Homography, ppm = 8): FieldsImage {
+  const inset = 0.6; // keep the printed border out
+  const gap = 24;
+  const parts = (['name', 'className', 'subject'] as const).map((key) => {
+    const b = WRITE_BOXES[key];
+    return { key, gray: warpRegion(g, toImage, b.x + inset, b.y + inset, b.w - inset * 2, b.h - inset * 2, ppm) };
+  });
+  const width = Math.max(...parts.map((p) => p.gray.width));
+  const height = parts.reduce((s, p) => s + p.gray.height, 0) + gap * (parts.length + 1);
+  const data = new Uint8Array(width * height).fill(255);
+  const rows: FieldsImage['rows'] = [];
+  let top = gap;
+  for (const p of parts) {
+    for (let y = 0; y < p.gray.height; y++) data.set(p.gray.data.subarray(y * p.gray.width, (y + 1) * p.gray.width), (top + y) * width);
+    rows.push({ key: p.key, top, bottom: top + p.gray.height });
+    top += p.gray.height + gap;
+  }
+  return { gray: { data, width, height }, rows };
 }
 
 export const READ_HINTS: Record<ReadFailure['reason'], string> = {

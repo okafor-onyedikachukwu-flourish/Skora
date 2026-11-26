@@ -1,5 +1,5 @@
 import { Directory, File, Paths } from 'expo-file-system';
-import type { PhoneAnswer } from '../handwriting/parse';
+import type { PhoneAnswer, ReadFields } from '../handwriting/parse';
 import type { ReadAnswer } from './answers';
 
 /** A photo of one page, kept in Skora's scans folder until the script is saved or discarded. */
@@ -29,6 +29,10 @@ export type PendingScript = {
   gemini?: GeminiOutcome;
   /** Set when the script came from the waiting list, which then owns the photos. */
   queueId?: number;
+  /** Handwritten scripts: the name, class and subject written at the top, as the phone read them. */
+  fields?: ReadFields;
+  /** Skora sheets: the name, class and subject boxes cut out, for the result screen to read. */
+  fieldsImage?: { uri: string; rows: { key: keyof ReadFields; top: number; bottom: number }[] };
 };
 
 let pending: PendingScript | null = null;

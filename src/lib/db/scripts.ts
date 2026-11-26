@@ -83,6 +83,32 @@ export async function suggestNames(db: SQLiteDatabase, classId: number, typed: s
   return rows.map((r) => r.full_name);
 }
 
+/**
+ * How well Skora reads, from the scripts saved so far: of the answers it read, how many the
+ * teacher had to change before saving. Checked answers she kept count as read right.
+ */
+export type ReadingAccuracy = { sheetType: 'omr' | 'handwritten'; scripts: number; answers: number; changed: number };
+
+export async function readingAccuracy(db: SQLiteDatabase): Promise<ReadingAccuracy[]> {
+  return db.getAllAsync<ReadingAccuracy>(
+    `SELECT s.sheet_type AS sheetType, count(DISTINCT s.id) AS scripts, count(*) AS answers,
+            coalesce(sum(a.source = 'teacher'), 0) AS changed
+       FROM saved_answers a JOIN saved_scripts s ON s.id = a.script_id
+      GROUP BY s.sheet_type ORDER BY s.sheet_type DESC`,
+  );
+}
+
+/** Every student name Skora knows for an exam's classes: class lists and names saved before. */
+export async function knownNames(db: SQLiteDatabase, examId: number): Promise<{ name: string; classId: number }[]> {
+  const rows = await db.getAllAsync<{ full_name: string; class_id: number }>(
+    `SELECT ns.full_name, ns.class_id FROM name_suggestions ns
+       JOIN exam_classes ec ON ec.class_id = ns.class_id
+      WHERE ec.exam_id = ?`,
+    examId,
+  );
+  return rows.map((r) => ({ name: r.full_name, classId: r.class_id }));
+}
+
 /** Subjects typed on earlier saves, most recent first. */
 export async function recentSubjects(db: SQLiteDatabase): Promise<string[]> {
   const rows = await db.getAllAsync<{ subject: string }>(

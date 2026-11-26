@@ -102,16 +102,22 @@ function darkBlobs(g: Gray): Blob[] {
   }
   const r = Math.max(15, Math.round(Math.min(W, H) / 14));
   const dark = new Uint8Array(W * H);
+  // Dark = clearly darker than the local average: v < mean - 18 and v < 0.8 × mean, compared
+  // without dividing (v × area against the window's sum), since this runs for every pixel.
   for (let y = 0; y < H; y++) {
-    const y0 = Math.max(0, y - r);
-    const y1 = Math.min(H, y + r + 1);
+    const y0 = y - r > 0 ? y - r : 0;
+    const y1 = y + r + 1 < H ? y + r + 1 : H;
+    const top = y0 * iw;
+    const bottom = y1 * iw;
+    const rows = y1 - y0;
+    const row = y * W;
     for (let x = 0; x < W; x++) {
-      const x0 = Math.max(0, x - r);
-      const x1 = Math.min(W, x + r + 1);
-      const sum = integral[y1 * iw + x1] - integral[y0 * iw + x1] - integral[y1 * iw + x0] + integral[y0 * iw + x0];
-      const mean = sum / ((x1 - x0) * (y1 - y0));
-      const v = data[y * W + x];
-      if (v < mean - 18 && v < mean * 0.8) dark[y * W + x] = 1;
+      const x0 = x - r > 0 ? x - r : 0;
+      const x1 = x + r + 1 < W ? x + r + 1 : W;
+      const sum = integral[bottom + x1] - integral[top + x1] - integral[bottom + x0] + integral[top + x0];
+      const area = (x1 - x0) * rows;
+      const va = data[row + x] * area;
+      if (va < sum - 18 * area && va * 5 < sum * 4) dark[row + x] = 1;
     }
   }
 

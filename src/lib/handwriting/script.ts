@@ -10,7 +10,7 @@ import type { Settings } from '../db/settings';
 import { readHandwriting, type Photo } from '../readHandwriting';
 import { handwrittenAnswers } from '../scan/answers';
 import { deletePhoto, scansDir, type GeminiOutcome, type PendingScript, type ScriptPage } from '../scan/pending';
-import { findAnswers, type PageIn, type PhoneAnswer } from './parse';
+import { findAnswers, writtenFields, type PageIn, type PhoneAnswer, type ReadFields } from './parse';
 
 /** Pages are kept at this many pixels on their longest side: sharp enough for the phone to read handwriting. */
 const PAGE_SIDE = 2000;
@@ -39,7 +39,7 @@ async function readOnPhone(pages: ScriptPage[], questionCount: number, optionCou
       if (!t) return null;
       read.push(t);
     }
-    return findAnswers(read, questionCount, optionCount);
+    return { ...findAnswers(read, questionCount, optionCount), fields: writtenFields(read[0]) as ReadFields };
   } catch {
     return null;
   }
@@ -115,6 +115,7 @@ export async function readHandwrittenScript(opts: {
       phone,
       readBy: 'phone',
       gemini: outcome,
+      fields: phoneRead?.fields,
     },
   };
 }

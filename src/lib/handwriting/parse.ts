@@ -517,3 +517,65 @@ function longestIncreasing(seq: Placed[]): Set<Placed> {
   }
   return out;
 }
+
+/** What the student wrote about themselves on the script, as read (not yet matched to the class list). */
+export type ReadFields = { name?: string; className?: string; subject?: string };
+
+const FIELD_LABEL =
+  /\b(full\s*name|names?|class|subject|date|exam(?:ination)?\s*no|reg(?:istration)?\s*no|admission\s*no|school|term|session|sign(?:ature)?)\b\s*[:;.=_-]*/gi;
+
+function fieldKey(label: string): keyof ReadFields | null {
+  const l = label.toLowerCase();
+  if (/name/.test(l)) return 'name';
+  if (/class/.test(l)) return 'className';
+  if (/subject/.test(l)) return 'subject';
+  return null;
+}
+
+/** A value as written: label words, rule lines and stray marks around it removed. */
+export function cleanField(text: string): string | undefined {
+  const v = text
+    .replace(FIELD_LABEL, ' ')
+    .replace(/[_.:;=|~*]{2,}/g, ' ')
+    .replace(/^[\s:;.,=_|~*-]+|[\s:;.,=_|~*-]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (v.match(/[A-Za-z]/g)?.length ?? 0) >= 2 ? v : undefined;
+}
+
+/**
+ * The name, class and subject written at the top of a handwritten script, such as
+ * "Name: Ada Obi   Class: JSS 2A" and "Subject: Maths" on the lines above the answers.
+ */
+export function writtenFields(page: PageIn): ReadFields {
+  const out: ReadFields = {};
+  const header = page.lines
+    .filter((l) => l.box.length !== 4 || l.box[1] < page.height * 0.45)
+    .sort((a, b) => (a.box[1] ?? 0) - (b.box[1] ?? 0) || (a.box[0] ?? 0) - (b.box[0] ?? 0));
+  for (const line of header) {
+    const text = line.text;
+    const labels = [...text.matchAll(FIELD_LABEL)];
+    labels.forEach((m, i) => {
+      const key = fieldKey(m[1]);
+      if (!key || out[key]) return;
+      const start = (m.index ?? 0) + m[0].length;
+      const end = i + 1 < labels.length ? labels[i + 1].index ?? text.length : text.length;
+      const value = cleanField(text.slice(start, end));
+      if (value) out[key] = value;
+    });
+  }
+  return out;
+}
+
+/** The name, class and subject read from the boxes of a Skora sheet (see fieldsImage in src/lib/scan/read.ts). */
+export function boxFields(page: PageIn, rows: { key: keyof ReadFields; top: number; bottom: number }[]): ReadFields {
+  const out: ReadFields = {};
+  for (const row of rows) {
+    const inside = page.lines
+      .filter((l) => l.box.length === 4 && (l.box[1] + l.box[3]) / 2 >= row.top && (l.box[1] + l.box[3]) / 2 <= row.bottom)
+      .sort((a, b) => a.box[0] - b.box[0]);
+    const value = cleanField(inside.map((l) => l.text).join(' '));
+    if (value) out[row.key] = value;
+  }
+  return out;
+}

@@ -27,6 +27,19 @@ const deps: Deps = {
     if (error) throw error;
     return data === true;
   },
+  giveBack: async (deviceId) => {
+    const { error } = await admin.rpc("give_back_gemini_request", { p_device: deviceId });
+    if (error) throw error;
+  },
+  modelOrder: async (models) => {
+    const { data, error } = await admin.rpc("gemini_model_order", { p_models: models });
+    if (error) throw error;
+    return Array.isArray(data) ? data.map(String) : models;
+  },
+  markBusy: async (model, seconds) => {
+    const { error } = await admin.rpc("mark_gemini_model_busy", { p_model: model, p_seconds: seconds });
+    if (error) throw error;
+  },
 };
 
 Deno.serve((req) => handle(req, deps));

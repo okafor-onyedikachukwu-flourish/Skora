@@ -46,7 +46,9 @@ deno test --sloppy-imports tools/test/sheet_test.ts tools/test/handwriting_test.
 
 ## Gemini
 
-Add `GEMINI_API_KEY` under Supabase → Edge Functions → Secrets. Optional secrets: `GEMINI_MODEL` (default `gemini-3.8-flash`), `SKORA_PER_PHONE_DAILY` (default 100), `SKORA_ALL_PHONES_DAILY` (default 200; keep it under the free daily limit Google AI Studio shows). Teachers can turn Gemini off in Settings.
+Add `GEMINI_API_KEY` under Supabase → Edge Functions → Secrets. Optional secrets: `GEMINI_MODELS` (models to try in order, default `gemini-3.5-flash-lite,gemini-3.6-flash,gemini-3.8-flash`), `GEMINI_MODEL` (one model to try first), `SKORA_PER_PHONE_DAILY` (default 100), `SKORA_ALL_PHONES_DAILY` (default 200; keep it under the free daily limit Google AI Studio shows). Teachers can turn Gemini off in Settings.
+
+When a model is overloaded, out of free quota or slow, the helper moves on to the next one and puts the busy model at the back of the line for three minutes. Thinking is set to the lowest level each model allows, and all tries together stop after 45 seconds. A request no model answered does not count against the daily limit. In the app, the result screen opens straight away with the phone's reading; Gemini checks the unclear answers in the background, and the teacher can fix or save without waiting.
 
 ## Handwritten scripts
 

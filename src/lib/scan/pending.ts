@@ -7,7 +7,8 @@ export type ScriptPage = { uri: string; width: number; height: number };
 
 /** What happened when Skora needed Gemini for a handwritten script. */
 export type GeminiOutcome = {
-  state: 'used' | 'off' | 'later' | 'failed';
+  /** asking: the result screen is asking Gemini now; later: try again when online or less busy. */
+  state: 'asking' | 'used' | 'off' | 'later' | 'failed';
   message?: string;
 };
 

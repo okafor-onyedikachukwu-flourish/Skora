@@ -1,9 +1,9 @@
 // Skora app: send an unclear handwritten script to the read-handwriting
 // Edge Function, then combine Gemini's reading with the phone's.
 //
-// Photos go in as base64 JPEG. Shrink them first (about 1600 px wide,
-// quality 0.7 keeps each photo well under the 4 MB limit), for example
-// with expo-image-manipulator's base64 output.
+// Photos go in as base64 JPEG. Shrink them first (about 1600 px on the
+// longest side at quality 0.7 keeps each well under the 4 MB limit and
+// quick to upload), for example with expo-image-manipulator's base64 output.
 
 export type Letter = "A" | "B" | "C" | "D" | "E";
 export type Chosen = Letter | "blank" | "several" | "unclear";
@@ -32,13 +32,17 @@ export async function readHandwriting(opts: {
   deviceId: string;         // settings.device_id
   questionCount: number;
   optionCount: 4 | 5;
-  photos: Photo[];          // 1 or 2 pages
+  photos: Photo[];          // 1 to 4 pages
   timeoutMs?: number;
+  signal?: AbortSignal;     // to stop waiting, for example when the teacher leaves the screen
   fetchFn?: typeof fetch;
 }): Promise<ReadResult> {
   const doFetch = opts.fetchFn ?? fetch;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 75_000);
+  // The helper gives up on Gemini after 45 seconds; the rest is time to upload the photos.
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 90_000);
+  const stop = () => controller.abort();
+  opts.signal?.addEventListener("abort", stop);
 
   let res: Response;
   try {
@@ -54,9 +58,10 @@ export async function readHandwriting(opts: {
       signal: controller.signal,
     });
   } catch {
-    return { ok: false, error: "offline", message: "No internet. The script will wait in the queue.", retryLater: true };
+    return { ok: false, error: "offline", message: "No internet, or the connection is too slow.", retryLater: true };
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener("abort", stop);
   }
 
   let body: Record<string, unknown> = {};

@@ -1,23 +1,39 @@
-import { handle, cleanAnswers, type Deps } from "./handler.ts";
+import { handle, cleanAnswers, modelsFrom, type Deps } from "./handler.ts";
 
 const PUB = "sb_publishable_test123";
 const photo = { mime_type: "image/jpeg", data: "A".repeat(400) };
 const job = { device_id: "0123456789abcdef0123456789abcdef", question_count: 5, option_count: 4, photos: [photo] };
 
 function assert(c: unknown, m: string) { if (!c) throw new Error("FAILED: " + m); }
-function make(opts: { env?: Record<string, string>; allow?: boolean; gemini?: () => Response | Promise<Response> } = {}) {
-  const calls = { take: 0, fetch: [] as { url: string; init: RequestInit }[] };
+function make(opts: {
+  env?: Record<string, string>;
+  allow?: boolean;
+  gemini?: (url: string, init: RequestInit) => Response | Promise<Response>;
+  order?: (models: string[]) => string[];
+  msPerCall?: number;
+} = {}) {
+  const calls = { take: 0, giveBack: 0, busy: [] as string[], fetch: [] as { url: string; init: RequestInit }[] };
   const env = { SUPABASE_PUBLISHABLE_KEYS: JSON.stringify({ default: PUB }), GEMINI_API_KEY: "g-key", ...opts.env };
+  let clock = 0;
   const deps: Deps = {
     env: (n) => (env as Record<string, string>)[n],
     takeRequest: async () => { calls.take++; return opts.allow ?? true; },
-    fetch: (async (url: string, init: RequestInit) => { calls.fetch.push({ url, init }); return opts.gemini ? opts.gemini() : new Response("{}"); }) as typeof fetch,
+    giveBack: async () => { calls.giveBack++; },
+    modelOrder: async (models) => (opts.order ? opts.order(models) : models),
+    markBusy: async (model) => { calls.busy.push(model); },
+    now: () => clock,
+    fetch: (async (url: string, init: RequestInit) => {
+      calls.fetch.push({ url, init });
+      clock += opts.msPerCall ?? 1000;
+      return opts.gemini ? opts.gemini(url, init) : new Response("{}");
+    }) as unknown as typeof fetch,
   };
   return { deps, calls };
 }
+const modelOf = (url: string) => decodeURIComponent(url.split("/models/")[1].split(":")[0]);
 const post = (body: unknown, key: string | null = PUB) =>
   new Request("http://x/read-handwriting", { method: "POST", headers: key ? { apikey: key, "content-type": "application/json" } : {}, body: typeof body === "string" ? body : JSON.stringify(body) });
-const geminiOk = (answers: unknown, extraParts: unknown[] = []) => () =>
+const geminiOk = (answers: unknown, extraParts: unknown[] = []) => (_url?: string, _init?: RequestInit) =>
   new Response(JSON.stringify({ candidates: [{ content: { parts: [...extraParts, { text: JSON.stringify({ answers }) }] } }] }), { status: 200 });
 
 Deno.test("preflight and method", async () => {
@@ -94,20 +110,67 @@ Deno.test("good read is cleaned", async () => {
   assert(sent.contents[0].parts[0].text.includes("questions, numbered 1 to 5"), "prompt has count");
 });
 
-Deno.test("gemini failures", async () => {
-  const cases: [() => Response | Promise<Response>, number, string][] = [
-    [() => new Response("slow down", { status: 429 }), 503, "gemini_busy"],
-    [() => new Response("oops", { status: 500 }), 503, "gemini_busy"],
-    [() => new Response("bad model", { status: 404 }), 502, "gemini_failed"],
-    [() => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "not json" }] } }] })), 502, "gemini_failed"],
-    [() => { throw new Error("network down"); }, 503, "gemini_busy"],
-  ];
-  for (const [g, status, code] of cases) {
-    const { deps } = make({ gemini: g });
+Deno.test("the models to try", () => {
+  assert(modelsFrom(() => undefined).join() === "gemini-3.5-flash-lite,gemini-3.6-flash,gemini-3.8-flash", "default models");
+  const env: Record<string, string> = { GEMINI_MODEL: "gemini-3.8-flash", GEMINI_MODELS: " gemini-x , gemini-3.8-flash," };
+  assert(modelsFrom((n) => env[n]).join() === "gemini-3.8-flash,gemini-x", "GEMINI_MODEL first, no repeats");
+});
+
+Deno.test("a busy model is skipped for the next one", async () => {
+  const { deps, calls } = make({
+    gemini: (url) => (modelOf(url) === "gemini-3.5-flash-lite" ? new Response("high demand", { status: 503 }) : geminiOk([{ q: 1, chosen: "C" }])()),
+  });
+  const r = await handle(post(job), deps);
+  const j = await r.json();
+  assert(r.status === 200 && j.model === "gemini-3.6-flash" && j.answers[0].chosen === "C", JSON.stringify(j));
+  assert(calls.busy.join() === "gemini-3.5-flash-lite", "busy model remembered: " + calls.busy);
+  assert(calls.giveBack === 0, "an answered request stays counted");
+  const thinking = calls.fetch.map((c) => JSON.parse(c.init.body as string).generationConfig.thinkingConfig?.thinkingLevel).join();
+  assert(thinking === "MINIMAL,MINIMAL", "lowest thinking sent: " + thinking);
+});
+
+Deno.test("models busy lately are tried last", async () => {
+  const { deps, calls } = make({ order: (m) => [m[2], m[0], m[1]], gemini: geminiOk([]) });
+  await handle(post(job), deps);
+  assert(modelOf(calls.fetch[0].url) === "gemini-3.8-flash", "first model from the order");
+  assert(JSON.parse(calls.fetch[0].init.body as string).generationConfig.thinkingConfig.thinkingLevel === "LOW", "3.8 Flash thinks low");
+});
+
+Deno.test("every model busy: busy, and the request is given back", async () => {
+  for (const g of [() => new Response("quota", { status: 429 }), () => new Response("oops", { status: 500 }), () => { throw new Error("timeout"); }]) {
+    const { deps, calls } = make({ gemini: g });
     const r = await handle(post(job), deps);
     const j = await r.json();
-    assert(r.status === status && j.error === code, `expected ${status} ${code}, got ${r.status} ${j.error}`);
+    assert(r.status === 503 && j.error === "gemini_busy", `${r.status} ${j.error}`);
+    assert(calls.fetch.length === 3 && calls.busy.length === 3 && calls.giveBack === 1, JSON.stringify(calls.busy) + calls.giveBack);
   }
+});
+
+Deno.test("the time limit stops the tries", async () => {
+  const { deps, calls } = make({ msPerCall: 25_000, gemini: () => new Response("slow", { status: 503 }) });
+  const r = await handle(post(job), deps);
+  assert(r.status === 503 && calls.fetch.length === 2, `tries: ${calls.fetch.length}`);
+});
+
+Deno.test("other Gemini failures", async () => {
+  // A missing model or a bad reply: the next model is tried.
+  const missing = make({ gemini: (url) => (modelOf(url) === "gemini-3.5-flash-lite" ? new Response("no model", { status: 404 }) : geminiOk([])()) });
+  assert((await handle(post(job), missing.deps)).status === 200, "404 falls through");
+  const badReply = make({ gemini: () => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "not json" }] } }] })) });
+  const r1 = await handle(post(job), badReply.deps);
+  assert(r1.status === 502 && (await r1.json()).error === "gemini_failed" && badReply.calls.giveBack === 1, "all bad replies: 502, given back");
+  // A model that does not take the thinking setting is asked again without it.
+  const noThinking = make({
+    gemini: (_u, init) => (JSON.parse(init.body as string).generationConfig.thinkingConfig ? new Response("thinking level not supported", { status: 400 }) : geminiOk([])()),
+  });
+  assert((await handle(post(job), noThinking.deps)).status === 200 && noThinking.calls.fetch.length === 2, "retried without thinking");
+  // A wrong key: stop at once. A refused request: the other models are tried.
+  const badKey = make({ gemini: () => new Response("API key not valid", { status: 400 }) });
+  const r2 = await handle(post(job), badKey.deps);
+  assert(r2.status === 503 && (await r2.json()).error === "not_set_up" && badKey.calls.fetch.length === 1, "bad key");
+  const refused = make({ gemini: () => new Response("image could not be processed", { status: 400 }) });
+  const r3 = await handle(post(job), refused.deps);
+  assert(r3.status === 502 && refused.calls.fetch.length === 3 && refused.calls.giveBack === 1, "refused by every model: 502");
 });
 
 Deno.test("cleanAnswers fills every question", () => {

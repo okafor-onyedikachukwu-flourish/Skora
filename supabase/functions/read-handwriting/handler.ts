@@ -23,9 +23,16 @@
 //   400 bad_request · 401 unauthorized · 405 method_not_allowed
 //   429 limit_reached · 503 not_set_up or gemini_busy · 502 gemini_failed
 //
+// Gemini models: tried in order until one answers. A model that was busy
+// (overloaded, out of free quota or too slow) is tried last for the next
+// few minutes, so the teacher does not wait for it again and again. If no
+// model answers, the request does not count against the day's limit.
+//
 // Settings (Edge Functions > Secrets):
 //   GEMINI_API_KEY          required, from Google AI Studio
-//   GEMINI_MODEL            optional, default gemini-3.8-flash
+//   GEMINI_MODELS           optional, models to try, comma-separated; default
+//                           gemini-3.5-flash-lite,gemini-3.6-flash,gemini-3.8-flash
+//   GEMINI_MODEL            optional, one model to try before those
 //   SKORA_PER_PHONE_DAILY   optional, default 100 requests per phone a day
 //   SKORA_ALL_PHONES_DAILY  optional, default 200 requests a day for all
 //                           phones; keep it under the free daily limit
@@ -40,7 +47,17 @@ const MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_PHOTOS = 4;
 const MAX_PHOTO_BYTES = 4 * 1024 * 1024; // per photo, decoded
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024; // all photos together, decoded
-const GEMINI_TIMEOUT_MS = 60_000;
+const DEFAULT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"];
+// The lowest thinking each model allows. Reading letters needs little thought, and thinking is slow.
+const THINKING: Record<string, string> = {
+  "gemini-3.8-flash": "LOW",
+  "gemini-3.6-flash": "MINIMAL",
+  "gemini-3.5-flash-lite": "MINIMAL",
+  "gemini-3-flash-preview": "MINIMAL",
+};
+const TOTAL_TIME_MS = 45_000; // all tries together, so the phone hears back in time
+const TRY_TIME_MS = 25_000; // one model
+const BUSY_SECONDS = 180; // how long a busy model goes to the back of the line
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -51,8 +68,20 @@ const CORS = {
 export type Deps = {
   env: (name: string) => string | undefined;
   takeRequest: (deviceId: string, perPhone: number, allPhones: number) => Promise<boolean>;
+  /** Hands back a request no model answered, so it does not use up the day's limit. */
+  giveBack: (deviceId: string) => Promise<void>;
+  /** The models in the order to try them: those busy lately go last. */
+  modelOrder: (models: string[]) => Promise<string[]>;
+  markBusy: (model: string, seconds: number) => Promise<void>;
   fetch: typeof fetch;
+  now?: () => number;
 };
+
+export function modelsFrom(env: Deps["env"]): string[] {
+  const listed = (env("GEMINI_MODELS") ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+  const first = (env("GEMINI_MODEL") ?? "").trim();
+  return [...new Set([...(first ? [first] : []), ...(listed.length ? listed : DEFAULT_MODELS)])];
+}
 
 function reply(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -147,7 +176,7 @@ function promptFor(job: Job): string {
   ].join("\n");
 }
 
-function geminiBody(job: Job) {
+function geminiBody(job: Job, thinkingLevel?: string) {
   const allowed = [...lettersFor(job.optionCount), "blank", "several", "unclear"];
   return {
     contents: [{
@@ -158,6 +187,7 @@ function geminiBody(job: Job) {
       ],
     }],
     generationConfig: {
+      ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
       responseMimeType: "application/json",
       responseSchema: {
         type: "OBJECT",
@@ -234,7 +264,62 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     return fail(429, "limit_reached", "Today's Gemini limit is used up. Fix the unclear answers by hand, or try again tomorrow.");
   }
 
-  const model = deps.env("GEMINI_MODEL") || "gemini-3.8-flash";
+  const now = deps.now ?? Date.now;
+  const deadline = now() + TOTAL_TIME_MS;
+  let order = modelsFrom(deps.env);
+  try {
+    const sorted = await deps.modelOrder(order);
+    if (sorted.length === order.length) order = sorted;
+  } catch (e) {
+    console.error("gemini_model_order failed", e);
+  }
+
+  let busy = false;
+  for (const model of order) {
+    const left = deadline - now();
+    if (left < 4_000) break;
+    let result = await tryModel(deps, apiKey, model, job, Math.min(TRY_TIME_MS, left), THINKING[model]);
+    if (result.kind === "thinking") result = await tryModel(deps, apiKey, model, job, Math.min(TRY_TIME_MS, deadline - now()), undefined);
+    if (result.kind === "ok") return reply(200, { answers: cleanAnswers(result.parsed, job), model });
+    if (result.kind === "key") {
+      await giveBack(deps, job.deviceId);
+      return fail(503, "not_set_up", "The Gemini key is not working. Fix the unclear answers by hand for now.");
+    }
+    if (result.kind === "busy") {
+      busy = true;
+      try {
+        await deps.markBusy(model, BUSY_SECONDS);
+      } catch (e) {
+        console.error("mark_gemini_model_busy failed", e);
+      }
+    }
+    // Busy, gone, refused or a bad reply: try the next model.
+  }
+
+  await giveBack(deps, job.deviceId);
+  return busy
+    ? fail(503, "gemini_busy", "Gemini is busy right now. Fix the unclear answers yourself, or keep the script for later.")
+    : fail(502, "gemini_failed", "Gemini could not read this script. Fix the unclear answers by hand.");
+}
+
+async function giveBack(deps: Deps, deviceId: string) {
+  try {
+    await deps.giveBack(deviceId);
+  } catch (e) {
+    console.error("give_back_gemini_request failed", e);
+  }
+}
+
+type Try =
+  | { kind: "ok"; parsed: unknown }
+  | { kind: "busy" } // overloaded, out of quota or too slow: try another model
+  | { kind: "thinking" } // this model does not take the thinking setting: try it again without
+  | { kind: "missing" } // no such model (any more)
+  | { kind: "bad_reply" } // the reply was not the JSON asked for
+  | { kind: "key" } // the API key is wrong or not allowed
+  | { kind: "refused" }; // Gemini refused the request (another model may still take it)
+
+async function tryModel(deps: Deps, apiKey: string, model: string, job: Job, timeoutMs: number, thinkingLevel?: string): Promise<Try> {
   let res: Response;
   try {
     res = await deps.fetch(
@@ -242,34 +327,33 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-        body: JSON.stringify(geminiBody(job)),
-        signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+        body: JSON.stringify(geminiBody(job, thinkingLevel)),
+        signal: AbortSignal.timeout(Math.max(1_000, timeoutMs)),
       },
     );
   } catch (e) {
-    console.error("Gemini request failed", e);
-    return fail(503, "gemini_busy", "Gemini did not answer in time. The script stays in the queue.");
+    console.error(`Gemini ${model} did not answer`, String(e).slice(0, 200));
+    return { kind: "busy" };
   }
 
-  if (res.status === 429 || res.status >= 500) {
-    console.error("Gemini busy", res.status, (await res.text()).slice(0, 500));
-    return fail(503, "gemini_busy", "Gemini is busy right now. The script stays in the queue.");
-  }
   if (!res.ok) {
-    console.error("Gemini error", res.status, (await res.text()).slice(0, 500));
-    return fail(502, "gemini_failed", "Gemini could not read this script. Fix the unclear answers by hand.");
+    const text = (await res.text()).slice(0, 500);
+    console.error(`Gemini ${model} ${res.status}`, text);
+    if (res.status === 429 || res.status >= 500) return { kind: "busy" };
+    if (res.status === 404) return { kind: "missing" };
+    if (res.status === 401 || res.status === 403) return { kind: "key" };
+    if (res.status === 400 && thinkingLevel && /thinking/i.test(text)) return { kind: "thinking" };
+    if (res.status === 400 && /api key/i.test(text)) return { kind: "key" };
+    return { kind: "refused" };
   }
 
-  let parsed: unknown;
   try {
     const data = await res.json();
     const parts: { text?: string; thought?: boolean }[] = data?.candidates?.[0]?.content?.parts ?? [];
     const text = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
-    parsed = JSON.parse(text);
+    return { kind: "ok", parsed: JSON.parse(text) };
   } catch (e) {
-    console.error("Gemini reply was not JSON", e);
-    return fail(502, "gemini_failed", "Gemini could not read this script. Fix the unclear answers by hand.");
+    console.error(`Gemini ${model} reply was not JSON`, e);
+    return { kind: "bad_reply" };
   }
-
-  return reply(200, { answers: cleanAnswers(parsed, job), model });
 }

@@ -1,7 +1,7 @@
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useSQLiteContext } from 'expo-sqlite';
-import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { DateField } from '../../../components/DateField';
 import { PageCrop, PageView } from '../../../components/PageCrop';
 import { QuestionCrop } from '../../../components/QuestionCrop';
@@ -12,7 +12,8 @@ import { addToQueue, removeFromQueue } from '../../../lib/db/queue';
 import { AlreadySaved, recentSubjects, saveScript, suggestNames, type Chosen } from '../../../lib/db/scripts';
 import { friendlyError } from '../../../lib/errors';
 import { formatMarks, lettersFor, today } from '../../../lib/exams';
-import { describeAnswer, type ReadAnswer } from '../../../lib/scan/answers';
+import { askGemini, readByOf } from '../../../lib/handwriting/script';
+import { describeAnswer, handwrittenAnswers, type ReadAnswer } from '../../../lib/scan/answers';
 import {
   clearPending,
   getPending,
@@ -20,11 +21,14 @@ import {
   releasePending,
   rememberSaveDefaults,
   setLastSaved,
+  type GeminiOutcome,
   type PendingScript,
 } from '../../../lib/scan/pending';
+import { useSettings } from '../../../lib/settings';
 import { useLoad } from '../../../lib/useLoad';
 
-type Entry = ReadAnswer & { fixed: boolean };
+/** fixed: the teacher changed the answer; touched: she chose or accepted it, so Gemini leaves it alone. */
+type Entry = ReadAnswer & { fixed: boolean; touched: boolean };
 
 export default function ResultScreen() {
   const { id: idParam } = useLocalSearchParams<{ id: string }>();
@@ -54,8 +58,16 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
   const { width } = useWindowDimensions();
   const defaults = getSaveDefaults(exam.id);
   const [entries, setEntries] = useState<Entry[]>(() =>
-    Array.from({ length: exam.questionCount }, (_, i) => ({ ...(pending.answers[i] ?? { chosen: null, unsure: true, source: 'mlkit' }), fixed: false })),
+    Array.from({ length: exam.questionCount }, (_, i) => ({
+      ...(pending.answers[i] ?? { chosen: null, unsure: true, source: 'mlkit' }),
+      fixed: false,
+      touched: false,
+    })),
   );
+  const { settings } = useSettings();
+  const [gemini, setGemini] = useState<GeminiOutcome | undefined>(pending.gemini);
+  const [readBy, setReadBy] = useState(pending.readBy);
+  const geminiStop = useRef<AbortController | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [showPage, setShowPage] = useState<number | null>(null);
@@ -98,13 +110,45 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
   const percent = maxScore > 0 ? Math.round((score / maxScore) * 1000) / 10 : 0;
 
   function choose(i: number, chosen: Chosen) {
-    setEntries((list) => list.map((e, j) => (j === i ? { ...e, chosen, unsure: false, fixed: e.fixed || chosen !== e.chosen } : e)));
+    setEntries((list) =>
+      list.map((e, j) => (j === i ? { ...e, chosen, unsure: false, touched: true, fixed: e.fixed || chosen !== e.chosen } : e)),
+    );
     setEditing(null);
   }
 
   function acceptAll() {
-    setEntries((list) => list.map((e) => (e.unsure && e.chosen !== null ? { ...e, unsure: false } : e)));
+    setEntries((list) => list.map((e) => (e.unsure && e.chosen !== null ? { ...e, unsure: false, touched: true } : e)));
   }
+
+  // Gemini reads the unclear answers while the teacher already sees the score and can fix them.
+  async function askGeminiNow() {
+    if (!settings || !pending.phone) return;
+    geminiStop.current?.abort();
+    const stop = new AbortController();
+    geminiStop.current = stop;
+    setGemini({ state: 'asking' });
+    try {
+      const r = await askGemini(settings, pending.pages, exam.questionCount, exam.optionCount, stop.signal);
+      if (stop.signal.aborted) return;
+      if (!r.ok) {
+        setGemini({ state: r.retryLater ? 'later' : 'failed', message: r.message });
+        return;
+      }
+      const merged = handwrittenAnswers(pending.phone, r.answers, exam.questionCount);
+      setEntries((list) => list.map((e, i) => (e.touched || !merged[i] ? e : { ...merged[i], fixed: false, touched: false })));
+      setReadBy(readByOf(pending.phone, r.answers));
+      setGemini({ state: 'used' });
+    } catch (e) {
+      if (!stop.signal.aborted) setGemini({ state: 'failed', message: friendlyError(e) });
+    }
+  }
+
+  useEffect(() => {
+    if (pending.gemini?.state === 'asking') Promise.resolve().then(askGeminiNow);
+    return () => geminiStop.current?.abort();
+    // Only once, when the screen opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function save(replace = false) {
     setMessage(null);
@@ -119,7 +163,7 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
         subject,
         writtenOn,
         sheetType: pending.sheetType,
-        readBy: pending.readBy,
+        readBy,
         teacherFixes: entries.filter((e) => e.fixed).length,
         answers: entries.map((e, i) => ({ q: i + 1, chosen: e.chosen ?? 'blank', source: e.fixed ? 'teacher' : e.source })),
         replace,
@@ -164,8 +208,9 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
 
   async function keepForLater() {
     setBusy(true);
+    geminiStop.current?.abort();
     try {
-      await addToQueue(db, exam.id, pending.pages, pending.phone ?? [], pending.gemini?.message);
+      await addToQueue(db, exam.id, pending.pages, pending.phone ?? [], gemini?.message);
       releasePending();
       setLastSaved({ examId: exam.id, kept: true });
       router.back();
@@ -176,8 +221,7 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
   }
 
   const cropWidth = Math.min(width - space.lg * 2 - space.md * 2 - 2, 420);
-  const gemini = pending.gemini;
-  const canKeep = handwritten && pending.queueId === undefined && gemini?.state === 'later';
+  const canKeep = handwritten && pending.queueId === undefined && (gemini?.state === 'later' || gemini?.state === 'asking');
 
   return (
     <Screen>
@@ -195,19 +239,31 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
         </Text>
         {handwritten ? (
           <Text style={{ fontSize: 13, color: colors.muted, marginTop: 4 }}>
-            {pending.readBy === 'both' ? 'Read by the phone and Gemini.' : pending.readBy === 'gemini' ? 'Read by Gemini.' : 'Read by the phone.'}
+            {readBy === 'both' ? 'Read by the phone and Gemini.' : readBy === 'gemini' ? 'Read by Gemini.' : 'Read by the phone.'}
             {unsure.length ? ' The score counts only the answers read so far.' : ''}
           </Text>
         ) : null}
       </Card>
 
-      {gemini?.state === 'later' ? (
+      {gemini?.state === 'asking' ? (
+        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}>
+          <ActivityIndicator color={colors.primary} />
+          <Text style={{ flex: 1, fontSize: 14, color: colors.text }}>
+            {`Gemini is checking the ${unsure.length} unclear ${unsure.length === 1 ? 'answer' : 'answers'}. You can fix them yourself meanwhile, or save once they are done.`}
+          </Text>
+        </Card>
+      ) : gemini?.state === 'later' ? (
         <Banner
           tone="info"
           icon="cloud-offline-outline"
-          title="Gemini could not help yet"
-          text={`${gemini.message ?? 'No internet.'} ${canKeep ? 'Fix the highlighted answers yourself, or keep this script for later: Skora asks Gemini again when you are back online.' : 'Fix the highlighted answers yourself, or come back after Skora has asked Gemini again.'}`}
-          action={canKeep ? <Button small title="Keep for later" icon="time-outline" onPress={keepForLater} loading={busy} /> : undefined}
+          title="Gemini could not help this time"
+          text={`${gemini.message ?? 'No internet.'} Fix the highlighted answers yourself${canKeep ? ', try again, or keep this script for later: Skora asks Gemini again from the waiting list.' : ', or try again.'}`}
+          action={
+            <View style={{ flexDirection: 'row', gap: space.sm, flexWrap: 'wrap' }}>
+              {pending.queueId === undefined ? <Button small variant="secondary" title="Try again" icon="refresh" onPress={askGeminiNow} /> : null}
+              {canKeep ? <Button small title="Keep for later" icon="time-outline" onPress={keepForLater} loading={busy} /> : null}
+            </View>
+          }
         />
       ) : gemini?.state === 'failed' ? (
         <Banner tone="warning" icon="alert-circle-outline" title="Gemini could not read this script" text={`${gemini.message ?? ''} Fix the highlighted answers yourself.`.trim()} />

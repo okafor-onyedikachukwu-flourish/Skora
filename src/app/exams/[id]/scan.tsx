@@ -62,6 +62,7 @@ function Scanner({ exam }: { exam: Exam }) {
   const { settings } = useSettings();
   const camera = useRef<CameraView>(null);
   const [ready, setReady] = useState(false);
+  const [pictureSize, setPictureSize] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState<string | null>(null);
   const [torch, setTorch] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -97,6 +98,19 @@ function Scanner({ exam }: { exam: Exam }) {
     }, [exam.id]),
   );
 
+  // Full-size photos (12 MP and more) are slow to take and to shrink, and Skora only needs about
+  // 2000 pixels. Use the smallest picture size the camera offers that is still big enough.
+  async function onCameraReady() {
+    setReady(true);
+    if (pictureSize !== undefined) return;
+    try {
+      const sizes = (await camera.current?.getAvailablePictureSizesAsync()) ?? [];
+      setPictureSize(smallestEnough(sizes, 2000));
+    } catch {
+      setPictureSize('');
+    }
+  }
+
   function switchMode(next: ScanMode) {
     if (next === mode) return;
     for (const p of pages) deletePhoto(p.uri);
@@ -106,8 +120,8 @@ function Scanner({ exam }: { exam: Exam }) {
     setScanMode(exam.id, next);
   }
 
-  async function readSkoraSheet(uri: string, width: number, height: number) {
-    const g = await loadPhoto(uri, width, height);
+  async function readSkoraSheet(uri: string) {
+    const g = await loadPhoto(uri);
     dropCacheCopy(uri);
     const read = readSheet(g, { questionCount: exam.questionCount, optionCount: exam.optionCount });
     if (!read.ok) {
@@ -123,7 +137,7 @@ function Scanner({ exam }: { exam: Exam }) {
     }
     // A straightened copy of the page lets the teacher check unclear answers on the result screen.
     const page = straighten(g, read.toImage, 3);
-    const imageUri = saveGrayJpeg(page, `${randomUUID()}.jpg`, 70);
+    const imageUri = await saveGrayJpeg(page, `${randomUUID()}.jpg`, 70);
     setPending({
       examId: exam.id,
       sheetType: 'omr',
@@ -159,7 +173,6 @@ function Scanner({ exam }: { exam: Exam }) {
       optionCount: exam.optionCount,
       pages: list,
       settings,
-      onStep: setBusy,
     });
     pagesRef.current = []; // the result screen (or nobody, if none were found) owns them now
     setPages([]);
@@ -194,7 +207,7 @@ function Scanner({ exam }: { exam: Exam }) {
       }
       const photo = await camera.current.takePictureAsync({ quality: 0.9 });
       if (!photo) return;
-      if (mode === 'omr') await readSkoraSheet(photo.uri, photo.width, photo.height);
+      if (mode === 'omr') await readSkoraSheet(photo.uri);
       else await addPages([photo.uri]);
     });
 
@@ -204,7 +217,7 @@ function Scanner({ exam }: { exam: Exam }) {
         const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 });
         if (res.canceled) return;
         const a = res.assets[0];
-        await readSkoraSheet(a.uri, a.width, a.height);
+        await readSkoraSheet(a.uri);
         return;
       }
       const room = MAX_PAGES - pages.length;
@@ -242,7 +255,14 @@ function Scanner({ exam }: { exam: Exam }) {
 
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>
-      <CameraView ref={camera} style={StyleSheet.absoluteFill} facing="back" enableTorch={torch} onCameraReady={() => setReady(true)} />
+      <CameraView
+        ref={camera}
+        style={StyleSheet.absoluteFill}
+        facing="back"
+        enableTorch={torch}
+        pictureSize={pictureSize || undefined}
+        onCameraReady={onCameraReady}
+      />
 
       {mode === 'omr' ? (
         <View pointerEvents="none" style={styles.guides}>
@@ -348,6 +368,24 @@ function Scanner({ exam }: { exam: Exam }) {
       ) : null}
     </View>
   );
+}
+
+/** The smallest "WxH" size whose longest side is at least `min` pixels; '' (the camera's own choice) when none is. */
+function smallestEnough(sizes: string[], min: number): string {
+  let best = '';
+  let bestArea = Infinity;
+  for (const s of sizes) {
+    const m = /^(\d+)x(\d+)$/.exec(s);
+    if (!m) continue;
+    const w = Number(m[1]);
+    const h = Number(m[2]);
+    if (Math.max(w, h) < min || Math.min(w, h) < min * 0.7) continue;
+    if (w * h < bestArea) {
+      best = s;
+      bestArea = w * h;
+    }
+  }
+  return best;
 }
 
 /** Camera, picker and page-scanner photos are copies in the app's cache: delete them once Skora has its own copy. */

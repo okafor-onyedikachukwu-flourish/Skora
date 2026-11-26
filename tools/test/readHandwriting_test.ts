@@ -49,7 +49,13 @@ Deno.test("merge rules", () => {
   const gem = [{ q: 1, chosen: "A" as const }, { q: 2, chosen: "C" as const }, { q: 3, chosen: "D" as const }, { q: 4, chosen: "unclear" as const }, { q: 5, chosen: "unclear" as const }];
   const m = mergeReads(5, phone, gem);
   const s = m.map((a) => `${a.q}:${a.chosen}:${a.source}:${a.clear ? "clear" : "check"}${a.alsoRead ? "/" + a.alsoRead : ""}`).join(" ");
-  assert(s === "1:A:mlkit:clear 2:B:mlkit:check/C 3:D:gemini:clear 4:D:mlkit:clear 5:unclear:gemini:check", s);
+  assert(s === "1:A:mlkit:clear 2:B:mlkit:check/C 3:D:gemini:check/C 4:D:mlkit:clear 5:unclear:gemini:check", s);
+  // Phone had no guess: Gemini's answer stands. Phone guessed the same: clear.
+  const g2 = mergeReads(2, [{ q: 1, chosen: "unclear", clear: false }, { q: 2, chosen: "B", clear: false }], [{ q: 1, chosen: "C" }, { q: 2, chosen: "B" }]);
+  assert(g2[0].chosen === "C" && g2[0].clear && g2[1].chosen === "B" && g2[1].clear, JSON.stringify(g2));
+  // Neither sure: the phone's guess is offered first.
+  const g3 = mergeReads(1, [{ q: 1, chosen: "A", clear: false }], [{ q: 1, chosen: "unclear" }]);
+  assert(g3[0].chosen === "A" && !g3[0].clear && g3[0].source === "mlkit", JSON.stringify(g3));
   const noGem = mergeReads(2, [{ q: 1, chosen: "blank", clear: true }], null);
   assert(noGem[0].chosen === "blank" && noGem[0].clear && noGem[1].chosen === "unclear" && !noGem[1].clear && noGem[1].source === "mlkit", "phone only");
 });

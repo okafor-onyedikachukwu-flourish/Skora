@@ -62,6 +62,7 @@ function RootNavigator() {
         <Stack.Screen name="exams/[id]/sheets" options={{ title: 'Answer sheets' }} />
         <Stack.Screen name="exams/[id]/scan" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="exams/[id]/result" options={{ title: 'Result', gestureEnabled: false }} />
+        <Stack.Screen name="waiting" options={{ title: 'Kept for later' }} />
       </Stack.Protected>
     </Stack>
   );

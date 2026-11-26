@@ -45,7 +45,8 @@ Deno.test("body checks", async () => {
     { ...job, question_count: 2.5 },
     { ...job, option_count: 3 },
     { ...job, photos: [] },
-    { ...job, photos: [photo, photo, photo] },
+    { ...job, photos: [photo, photo, photo, photo, photo] },
+    { ...job, photos: Array(4).fill({ mime_type: "image/jpeg", data: "A".repeat(4_200_000) }) },
     { ...job, photos: [{ mime_type: "image/gif", data: photo.data }] },
     { ...job, photos: [{ mime_type: "image/jpeg", data: "not base64!!" + "A".repeat(200) }] },
     { ...job, photos: [{ mime_type: "image/jpeg", data: "A".repeat(6_000_000) }] },
@@ -114,4 +115,12 @@ Deno.test("cleanAnswers fills every question", () => {
   assert(out.length === 3 && out.every((a) => a.chosen === "unclear"), "all unclear");
   const five = cleanAnswers({ answers: [{ q: 1, chosen: "E" }] }, { deviceId: "", questionCount: 1, optionCount: 5, photos: [] });
   assert(five[0].chosen === "E", "E allowed with 5 options");
+});
+
+Deno.test("four pages are accepted", async () => {
+  const { deps, calls } = make({ gemini: geminiOk([{ q: 1, chosen: "A" }]) });
+  const r = await handle(post({ ...job, photos: [photo, photo, photo, photo] }), deps);
+  const parts = JSON.parse(calls.fetch[0].init.body as string).contents[0].parts;
+  assert(r.status === 200 && parts.length === 5, `status ${r.status}, parts ${parts.length}`);
+  assert(String(parts[0].text).includes("4 pages"), "prompt mentions the pages");
 });

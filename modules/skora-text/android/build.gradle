@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.skora.app'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.skoratext"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+dependencies {
+  // ML Kit's Latin text recogniser with the model inside the app, so it works offline from the first scan.
+  implementation 'com.google.mlkit:text-recognition:16.0.1'
+}

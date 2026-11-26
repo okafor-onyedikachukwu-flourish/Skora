@@ -164,4 +164,28 @@ k.execute("insert into saved_scripts(exam_id, class_id, student_name, subject, w
 RECENT = "SELECT subject FROM saved_scripts GROUP BY lower(subject) ORDER BY max(saved_at) DESC LIMIT 8"
 assert [r[0] for r in k.execute(RECENT).fetchall()] == ["English", "Maths"], k.execute(RECENT).fetchall()
 print("save, duplicate check, name suggestions, recent subjects: ok")
+# The statements used by the waiting list in src/lib/db/queue.ts.
+import json
+qsrc = open("src/lib/db/queue.ts").read()
+INSERT = "INSERT INTO scan_queue (exam_id, sheet_type, photo_uris, phone_answers, last_error) VALUES (?, 'handwritten', ?, ?, ?)"
+COUNT = "SELECT count(*) AS total, coalesce(sum(status IN ('waiting', 'sending')), 0) AS waiting FROM scan_queue"
+READ = "UPDATE scan_queue SET status = 'read', gemini_answers = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?"
+FAILED = "UPDATE scan_queue SET status = ?, attempts = attempts + 1, last_error = ? WHERE id = ?"
+for stmt in (INSERT, COUNT, READ, FAILED):
+    assert stmt in qsrc.replace("`", ""), "queue.ts statement changed: " + stmt[:40]
+assert k.execute(COUNT).fetchone() == (0, 0)
+pages = json.dumps([{"name": "a.jpg", "width": 1500, "height": 2000}])
+phone = json.dumps([{"q": 1, "chosen": None, "clear": False, "why": "not-found"}])
+a = k.execute(INSERT, (1, pages, phone, "No internet.")).lastrowid
+b = k.execute(INSERT, (1, pages, phone, None)).lastrowid
+assert k.execute(COUNT).fetchone() == (2, 2)
+k.execute(READ, (json.dumps([{"q": 1, "chosen": "B"}]), a))
+k.execute(FAILED, ("waiting", "Gemini is busy.", b))
+assert k.execute(COUNT).fetchone() == (2, 1)
+assert k.execute("select status, attempts, last_error from scan_queue where id=?", (b,)).fetchone() == ("waiting", 1, "Gemini is busy.")
+k.execute(FAILED, ("failed", "Gemini could not read it.", b))
+assert k.execute(COUNT).fetchone() == (2, 0)
+k.execute("delete from exams where id = 1")
+assert k.execute(COUNT).fetchone() == (0, 0), "deleting the exam empties its waiting list"
+print("waiting list statements: ok")
 print("ALL PHONE DB TESTS PASSED")

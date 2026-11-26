@@ -3,30 +3,28 @@ import { useSQLiteContext } from 'expo-sqlite';
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { DateField } from '../../../components/DateField';
+import { PageCrop, PageView } from '../../../components/PageCrop';
 import { QuestionCrop } from '../../../components/QuestionCrop';
 import { colors, radius, space } from '../../../components/theme';
 import { Banner, Button, Card, Chip, EmptyState, ErrorView, Field, Input, LoadingView, Screen, SectionTitle, confirm } from '../../../components/ui';
 import { getExam, getKey, type Exam, type KeyRow } from '../../../lib/db/exams';
+import { addToQueue, removeFromQueue } from '../../../lib/db/queue';
 import { AlreadySaved, recentSubjects, saveScript, suggestNames, type Chosen } from '../../../lib/db/scripts';
 import { friendlyError } from '../../../lib/errors';
 import { formatMarks, lettersFor, today } from '../../../lib/exams';
-import { clearPending, getPending, getSaveDefaults, rememberSaveDefaults, setLastSaved, type PendingScript } from '../../../lib/scan/pending';
+import { describeAnswer, type ReadAnswer } from '../../../lib/scan/answers';
+import {
+  clearPending,
+  getPending,
+  getSaveDefaults,
+  releasePending,
+  rememberSaveDefaults,
+  setLastSaved,
+  type PendingScript,
+} from '../../../lib/scan/pending';
 import { useLoad } from '../../../lib/useLoad';
 
-type Entry = { chosen: Chosen; unsure: boolean; fixed: boolean };
-
-/** Turns the reader's answer characters (see src/lib/scan/read.ts) into answers the teacher can check. */
-function toEntries(answers: string, count: number): Entry[] {
-  return Array.from({ length: count }, (_, i) => {
-    const a = answers[i] ?? '-';
-    if (a >= 'A' && a <= 'E') return { chosen: a as Chosen, unsure: false, fixed: false };
-    if (a >= 'a' && a <= 'e') return { chosen: a.toUpperCase() as Chosen, unsure: true, fixed: false };
-    if (a === '#') return { chosen: 'several', unsure: true, fixed: false };
-    return { chosen: 'blank', unsure: false, fixed: false };
-  });
-}
-
-const describe = (c: Chosen) => (c === 'blank' ? 'Blank' : c === 'several' ? 'Several' : c);
+type Entry = ReadAnswer & { fixed: boolean };
 
 export default function ResultScreen() {
   const { id: idParam } = useLocalSearchParams<{ id: string }>();
@@ -55,9 +53,12 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
   const db = useSQLiteContext();
   const { width } = useWindowDimensions();
   const defaults = getSaveDefaults(exam.id);
-  const [entries, setEntries] = useState(() => toEntries(pending.answers, exam.questionCount));
+  const [entries, setEntries] = useState<Entry[]>(() =>
+    Array.from({ length: exam.questionCount }, (_, i) => ({ ...(pending.answers[i] ?? { chosen: null, unsure: true, source: 'mlkit' }), fixed: false })),
+  );
   const [editing, setEditing] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [showPage, setShowPage] = useState<number | null>(null);
   const [name, setName] = useState('');
   const [subject, setSubject] = useState(defaults.subject);
   const [writtenOn, setWrittenOn] = useState<string | null>(defaults.writtenOn ?? today());
@@ -67,6 +68,7 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const handwritten = pending.sheetType === 'handwritten';
 
   useEffect(() => {
     let active = true;
@@ -91,16 +93,17 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
   });
   const maxScore = keyRows.reduce((s, k) => s + k.marks, 0);
   const unsure = entries.map((e, i) => ({ e, i })).filter(({ e }) => e.unsure);
+  const noGuess = unsure.filter(({ e }) => e.chosen === null).length;
   const blanks = entries.filter((e) => e.chosen === 'blank').length;
   const percent = maxScore > 0 ? Math.round((score / maxScore) * 1000) / 10 : 0;
 
   function choose(i: number, chosen: Chosen) {
-    setEntries((list) => list.map((e, j) => (j === i ? { chosen, unsure: false, fixed: e.fixed || chosen !== e.chosen } : e)));
+    setEntries((list) => list.map((e, j) => (j === i ? { ...e, chosen, unsure: false, fixed: e.fixed || chosen !== e.chosen } : e)));
     setEditing(null);
   }
 
   function acceptAll() {
-    setEntries((list) => list.map((e) => (e.unsure ? { ...e, unsure: false } : e)));
+    setEntries((list) => list.map((e) => (e.unsure && e.chosen !== null ? { ...e, unsure: false } : e)));
   }
 
   async function save(replace = false) {
@@ -116,15 +119,14 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
         subject,
         writtenOn,
         sheetType: pending.sheetType,
-        readBy: 'phone',
+        readBy: pending.readBy,
         teacherFixes: entries.filter((e) => e.fixed).length,
-        answers: entries.map((e, i) => ({ q: i + 1, chosen: e.chosen, source: e.fixed ? 'teacher' : 'omr' })),
+        answers: entries.map((e, i) => ({ q: i + 1, chosen: e.chosen ?? 'blank', source: e.fixed ? 'teacher' : e.source })),
         replace,
       });
       rememberSaveDefaults(exam.id, { classId, subject: subject.trim(), writtenOn });
-      setLastSaved({ examId: exam.id, name: name.trim(), score: result.score, maxScore: result.maxScore });
-      clearPending();
-      router.back();
+      if (pending.queueId === undefined) setLastSaved({ examId: exam.id, name: name.trim(), score: result.score, maxScore: result.maxScore });
+      await finish();
     } catch (e) {
       setBusy(false);
       if (e instanceof AlreadySaved) {
@@ -138,17 +140,48 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
     }
   }
 
-  async function discard() {
-    if (!(await confirm('Discard this script?', 'Nothing is saved and the photo is deleted.', 'Discard'))) return;
+  /** Done with this script: delete its photos, and take it off the waiting list if it was there. */
+  async function finish() {
+    if (pending.queueId !== undefined) await removeFromQueue(db, pending.queueId);
     clearPending();
     router.back();
   }
 
+  async function discard() {
+    const fromList = pending.queueId !== undefined;
+    const ok = await confirm(
+      'Discard this script?',
+      `Nothing is saved and the ${pending.pages.length > 1 ? 'photos are' : 'photo is'} deleted.${fromList ? ' It also leaves the waiting list.' : ''}`,
+      'Discard',
+    );
+    if (!ok) return;
+    try {
+      await finish();
+    } catch (e) {
+      setMessage(friendlyError(e));
+    }
+  }
+
+  async function keepForLater() {
+    setBusy(true);
+    try {
+      await addToQueue(db, exam.id, pending.pages, pending.phone ?? [], pending.gemini?.message);
+      releasePending();
+      setLastSaved({ examId: exam.id, kept: true });
+      router.back();
+    } catch (e) {
+      setBusy(false);
+      setMessage(friendlyError(e));
+    }
+  }
+
   const cropWidth = Math.min(width - space.lg * 2 - space.md * 2 - 2, 420);
+  const gemini = pending.gemini;
+  const canKeep = handwritten && pending.queueId === undefined && gemini?.state === 'later';
 
   return (
     <Screen>
-      <Stack.Screen options={{ title: 'Result' }} />
+      <Stack.Screen options={{ title: pending.queueId !== undefined ? 'Waiting script' : 'Result' }} />
 
       <Card>
         <Text style={styles.score}>
@@ -160,20 +193,70 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
         <Text style={{ fontSize: 14, color: unsure.length ? colors.warning : colors.muted, marginTop: 4 }}>
           {[unsure.length ? `${unsure.length} to check` : 'Nothing to check', blanks ? `${blanks} left blank` : ''].filter(Boolean).join(' · ')}
         </Text>
+        {handwritten ? (
+          <Text style={{ fontSize: 13, color: colors.muted, marginTop: 4 }}>
+            {pending.readBy === 'both' ? 'Read by the phone and Gemini.' : pending.readBy === 'gemini' ? 'Read by Gemini.' : 'Read by the phone.'}
+            {unsure.length ? ' The score counts only the answers read so far.' : ''}
+          </Text>
+        ) : null}
       </Card>
+
+      {gemini?.state === 'later' ? (
+        <Banner
+          tone="info"
+          icon="cloud-offline-outline"
+          title="Gemini could not help yet"
+          text={`${gemini.message ?? 'No internet.'} ${canKeep ? 'Fix the highlighted answers yourself, or keep this script for later: Skora asks Gemini again when you are back online.' : 'Fix the highlighted answers yourself, or come back after Skora has asked Gemini again.'}`}
+          action={canKeep ? <Button small title="Keep for later" icon="time-outline" onPress={keepForLater} loading={busy} /> : undefined}
+        />
+      ) : gemini?.state === 'failed' ? (
+        <Banner tone="warning" icon="alert-circle-outline" title="Gemini could not read this script" text={`${gemini.message ?? ''} Fix the highlighted answers yourself.`.trim()} />
+      ) : gemini?.state === 'off' && unsure.length > 0 ? (
+        <Banner tone="info" icon="information-circle-outline" title="Gemini is off" text="Only the phone read this script. Turn on Gemini in Settings to help with hard-to-read writing." />
+      ) : null}
 
       {unsure.length > 0 ? (
         <>
-          <SectionTitle right={<Button small variant="ghost" title="Accept all" onPress={acceptAll} />}>Check these</SectionTitle>
+          <SectionTitle
+            right={unsure.length > noGuess ? <Button small variant="ghost" title="Accept all" onPress={acceptAll} /> : undefined}
+          >
+            Check these
+          </SectionTitle>
           <Text style={{ fontSize: 13, color: colors.muted, marginBottom: space.sm }}>
-            Faint, rubbed-out or double marks. Look at the photo and tap the student&apos;s answer, or Accept all to keep Skora&apos;s choice.
+            {handwritten
+              ? `Look at the photo and tap the student's answer.${unsure.length > noGuess ? " Accept all keeps Skora's choices." : ''}`
+              : "Faint, rubbed-out or double marks. Look at the photo and tap the student's answer, or Accept all to keep Skora's choice."}
           </Text>
           {unsure.map(({ e, i }) => (
             <Card key={i} style={{ marginBottom: space.sm, borderColor: colors.warning, borderWidth: 1 }}>
-              <Text style={{ fontWeight: '700', color: colors.text, marginBottom: space.sm }}>
-                Question {i + 1} · Skora read {describe(e.chosen)}
+              <Text style={{ fontWeight: '700', color: colors.text }}>
+                Question {i + 1} · {e.chosen === null ? 'Not read' : `Skora read ${describeAnswer(e.chosen)}`}
               </Text>
-              <QuestionCrop uri={pending.imageUri} index={i} optionCount={exam.optionCount} width={cropWidth} />
+              {e.note ? <Text style={{ fontSize: 13, color: colors.muted, marginTop: 2 }}>{e.note}</Text> : null}
+              <View style={{ marginTop: space.sm }}>
+                {handwritten ? (
+                  e.where && pending.pages[e.where.page] ? (
+                    <PageCrop page={pending.pages[e.where.page]} where={e.where} width={cropWidth} />
+                  ) : (
+                    <Button
+                      small
+                      variant="secondary"
+                      icon="document-outline"
+                      title={showPage === i ? 'Hide the script' : 'Look at the script'}
+                      onPress={() => setShowPage(showPage === i ? null : i)}
+                    />
+                  )
+                ) : (
+                  <QuestionCrop uri={pending.pages[0]?.uri ?? ''} index={i} optionCount={exam.optionCount} width={cropWidth} />
+                )}
+              </View>
+              {showPage === i ? (
+                <View style={{ marginTop: space.sm, gap: space.sm }}>
+                  {pending.pages.map((p, n) => (
+                    <PageView key={p.uri} page={p} width={cropWidth} where={e.where?.page === n ? e.where : undefined} />
+                  ))}
+                </View>
+              ) : null}
               <AnswerButtons letters={letters} value={e.chosen} onChoose={(c) => choose(i, c)} />
             </Card>
           ))}
@@ -187,12 +270,16 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
         <Card style={{ paddingVertical: space.xs }}>
           {entries.map((e, i) => {
             const k = key.get(i + 1);
-            const ok = k ? e.chosen === k.option : null;
+            const ok = k && e.chosen !== null ? e.chosen === k.option : null;
             return (
               <View key={i}>
                 <Pressable onPress={() => setEditing(editing === i ? null : i)} style={[styles.answerRow, e.unsure && { backgroundColor: colors.warningSoft }]}>
                   <Text style={styles.qNo}>{i + 1}</Text>
-                  <Text style={styles.chosen}>{describe(e.chosen)}</Text>
+                  <Text style={styles.chosen}>
+                    {e.chosen === null ? '?' : describeAnswer(e.chosen)}
+                    {e.source === 'gemini' && !e.fixed ? <Text style={styles.by}>  Gemini</Text> : null}
+                    {e.fixed ? <Text style={styles.by}>  you</Text> : null}
+                  </Text>
                   <Text style={styles.keyText}>{k ? `key ${k.option}` : 'no key'}</Text>
                   <Text style={[styles.mark, { color: ok ? colors.success : ok === false ? colors.danger : colors.faint }]}>
                     {ok ? '✓' : ok === false ? '✗' : '–'}
@@ -203,6 +290,21 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
             );
           })}
         </Card>
+      ) : null}
+
+      {handwritten && unsure.length === 0 ? (
+        <>
+          <SectionTitle right={<Button small variant="ghost" title={showPage === -1 ? 'Hide' : 'Show'} onPress={() => setShowPage(showPage === -1 ? null : -1)} />}>
+            {pending.pages.length > 1 ? 'The pages' : 'The page'}
+          </SectionTitle>
+          {showPage === -1 ? (
+            <View style={{ gap: space.sm, marginBottom: space.md }}>
+              {pending.pages.map((p) => (
+                <PageView key={p.uri} page={p} width={Math.min(width - space.lg * 2, 460)} />
+              ))}
+            </View>
+          ) : null}
+        </>
       ) : null}
 
       <SectionTitle>Save this script</SectionTitle>
@@ -258,14 +360,25 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
       </Card>
 
       <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.md }}>
-        <Button variant="secondary" icon="camera-outline" title="Scan again" onPress={() => { clearPending(); router.back(); }} style={{ flex: 1 }} />
+        {pending.queueId === undefined ? (
+          <Button
+            variant="secondary"
+            icon="camera-outline"
+            title="Scan again"
+            onPress={() => {
+              clearPending();
+              router.back();
+            }}
+            style={{ flex: 1 }}
+          />
+        ) : null}
         <Button variant="danger" icon="trash-outline" title="Discard" onPress={discard} style={{ flex: 1 }} />
       </View>
     </Screen>
   );
 }
 
-function AnswerButtons({ letters, value, onChoose }: { letters: string[]; value: Chosen; onChoose: (c: Chosen) => void }) {
+function AnswerButtons({ letters, value, onChoose }: { letters: string[]; value: Chosen | null; onChoose: (c: Chosen) => void }) {
   const options: Chosen[] = [...(letters as Chosen[]), 'blank', 'several'];
   return (
     <View style={[styles.chips, { marginTop: space.sm }]}>
@@ -273,11 +386,11 @@ function AnswerButtons({ letters, value, onChoose }: { letters: string[]; value:
         <Pressable
           key={o}
           onPress={() => onChoose(o)}
-          accessibilityLabel={describe(o)}
+          accessibilityLabel={describeAnswer(o)}
           accessibilityState={{ selected: value === o }}
           style={[styles.answerButton, value === o && styles.answerButtonOn, o.length > 1 && { paddingHorizontal: space.md }]}
         >
-          <Text style={[styles.answerButtonText, value === o && { color: '#fff' }]}>{describe(o)}</Text>
+          <Text style={[styles.answerButtonText, value === o && { color: '#fff' }]}>{describeAnswer(o)}</Text>
         </Pressable>
       ))}
     </View>
@@ -291,6 +404,7 @@ const styles = StyleSheet.create({
   answerRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingHorizontal: space.xs, borderRadius: radius.sm, gap: space.md },
   qNo: { width: 32, textAlign: 'right', fontWeight: '700', color: colors.text },
   chosen: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.text },
+  by: { fontSize: 12, fontWeight: '500', color: colors.faint },
   keyText: { fontSize: 13, color: colors.muted },
   mark: { width: 20, textAlign: 'center', fontSize: 16, fontWeight: '800' },
   answerButton: {

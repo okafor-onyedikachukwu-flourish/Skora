@@ -85,30 +85,36 @@ export type MergedAnswer = {
 const DEFINITE = (c: Chosen | undefined): c is Letter | "blank" | "several" =>
   c !== undefined && c !== "unclear";
 
-// The phone's reading and Gemini's reading, combined:
-//   * both give the same answer          -> that answer, clear
-//   * only one reader is sure            -> that reader's answer, clear
-//   * both are sure but give different answers -> unclear, teacher picks
-//   * neither is sure                    -> unclear, teacher picks
+// The phone's reading and Gemini's reading, combined. The phone gives its answer, whether it is
+// sure of it, and for answers it is not sure of, its best guess when it read a letter at all
+// (send "unclear" when it has none):
+//   * both sure and the same              -> that answer, clear
+//   * both sure but different             -> the phone's answer, teacher checks (alsoRead = Gemini's)
+//   * only the phone is sure              -> the phone's answer, clear
+//   * only Gemini is sure                 -> Gemini's answer, clear, unless the phone's guess
+//                                            differs: then the teacher checks
+//   * neither is sure                     -> the phone's guess or "unclear", teacher checks
 export function mergeReads(
   questionCount: number,
   phone: { q: number; chosen: Chosen; clear: boolean }[],
   gemini: { q: number; chosen: Chosen }[] | null,
 ): MergedAnswer[] {
-  const p = new Map(phone.map((a) => [a.q, a.clear ? a.chosen : "unclear" as Chosen]));
+  const p = new Map(phone.map((a) => [a.q, a]));
   const g = new Map((gemini ?? []).map((a) => [a.q, a.chosen]));
   const out: MergedAnswer[] = [];
   for (let q = 1; q <= questionCount; q++) {
-    const a = p.get(q);
+    const read = p.get(q);
+    const a = read?.chosen;
+    const phoneSure = !!read?.clear && DEFINITE(a);
     const b = g.get(q);
-    if (DEFINITE(a) && DEFINITE(b)) {
-      // On a disagreement the phone's answer is shown first and Gemini's
-      // beside it; the teacher must pick one before Save.
+    if (phoneSure && DEFINITE(b)) {
       out.push(a === b ? { q, chosen: a, source: "mlkit", clear: true } : { q, chosen: a, source: "mlkit", clear: false, alsoRead: b });
-    } else if (DEFINITE(a)) {
+    } else if (phoneSure) {
       out.push({ q, chosen: a, source: "mlkit", clear: true });
     } else if (DEFINITE(b)) {
-      out.push({ q, chosen: b, source: "gemini", clear: true });
+      out.push(DEFINITE(a) && a !== b ? { q, chosen: b, source: "gemini", clear: false, alsoRead: a } : { q, chosen: b, source: "gemini", clear: true });
+    } else if (DEFINITE(a)) {
+      out.push({ q, chosen: a, source: "mlkit", clear: false });
     } else {
       out.push({ q, chosen: "unclear", source: gemini ? "gemini" : "mlkit", clear: false });
     }

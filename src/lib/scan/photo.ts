@@ -31,7 +31,7 @@ export function saveGrayJpeg(g: Gray, name: string, quality = 70): string {
   if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
   const file = new File(dir, name);
   if (file.exists) file.delete();
-  file.write(bytes);
+  file.writeSync(bytes);
   return file.uri;
 }
 

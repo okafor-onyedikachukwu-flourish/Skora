@@ -2,7 +2,7 @@
 // read-handwriting: Skora's second reader for handwritten answer scripts.
 //
 // The phone calls this only when ML Kit could not read a script clearly
-// and Gemini is on in Settings. It sends one or two photos of the script;
+// and Gemini is on in Settings. It sends one to four photos of the script;
 // this function checks the daily limits, asks Gemini for one answer per
 // question and returns them. It stores nothing.
 //
@@ -12,7 +12,7 @@
 //     "device_id": "<32 hex characters from the phone's settings table>",
 //     "question_count": 40,          // 1 to 100
 //     "option_count": 4,             // 4 = A to D, 5 = A to E
-//     "photos": [ { "mime_type": "image/jpeg", "data": "<base64>" } ]  // 1 or 2
+//     "photos": [ { "mime_type": "image/jpeg", "data": "<base64>" } ]  // 1 to 4 pages
 //   }
 //
 // Reply 200:
@@ -37,7 +37,9 @@ type Photo = { mime_type: string; data: string };
 type Job = { deviceId: string; questionCount: number; optionCount: 4 | 5; photos: Photo[] };
 
 const MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_PHOTOS = 4;
 const MAX_PHOTO_BYTES = 4 * 1024 * 1024; // per photo, decoded
+const MAX_TOTAL_BYTES = 12 * 1024 * 1024; // all photos together, decoded
 const GEMINI_TIMEOUT_MS = 60_000;
 
 const CORS = {
@@ -105,10 +107,11 @@ function readJob(body: unknown): Job | string {
   const optionCount = b.option_count;
   if (optionCount !== 4 && optionCount !== 5) return "option_count must be 4 or 5.";
 
-  if (!Array.isArray(b.photos) || b.photos.length < 1 || b.photos.length > 2) {
-    return "Send one or two photos.";
+  if (!Array.isArray(b.photos) || b.photos.length < 1 || b.photos.length > MAX_PHOTOS) {
+    return `Send one to ${MAX_PHOTOS} photos.`;
   }
   const photos: Photo[] = [];
+  let total = 0;
   for (const p of b.photos) {
     const photo = p as Record<string, unknown>;
     if (typeof photo?.mime_type !== "string" || !MIME_TYPES.has(photo.mime_type)) {
@@ -117,7 +120,10 @@ function readJob(body: unknown): Job | string {
     if (typeof photo.data !== "string" || photo.data.length < 100 || !/^[A-Za-z0-9+/]+={0,2}$/.test(photo.data)) {
       return "Each photo must be base64 data.";
     }
-    if (decodedSize(photo.data) > MAX_PHOTO_BYTES) return "Each photo must be 4 MB or less.";
+    const size = decodedSize(photo.data);
+    if (size > MAX_PHOTO_BYTES) return "Each photo must be 4 MB or less.";
+    total += size;
+    if (total > MAX_TOTAL_BYTES) return "The photos together must be 12 MB or less.";
     photos.push({ mime_type: photo.mime_type, data: photo.data });
   }
 
@@ -128,7 +134,7 @@ function promptFor(job: Job): string {
   const n = job.questionCount;
   const letters = lettersFor(job.optionCount).join(", ");
   return [
-    `The photo${job.photos.length > 1 ? "s show" : " shows"} a student's handwritten answer script for an objective test with ${n} questions, numbered 1 to ${n}.`,
+    `The photo${job.photos.length > 1 ? `s show the ${job.photos.length} pages of` : " shows"} a student's handwritten answer script for an objective test with ${n} questions, numbered 1 to ${n}.`,
     `Each answer is one letter: ${letters}.`,
     `Find the student's answer to every question from 1 to ${n}.`,
     `- Students write answers in many ways, for example "1. B", "1) b", "1-B", "1B", or numbers and letters in columns. Small letters count the same as capitals.`,

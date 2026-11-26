@@ -4,6 +4,7 @@
 | --- | --- |
 | Phone database rules, re-marking and upgrades | `python3 tools/test/phone_db_test.py` |
 | Printed sheet | `deno test --sloppy-imports tools/test/sheet_test.ts` |
+| Handwriting reader (made-up ML Kit output, 400 made-up scripts) | `deno test --sloppy-imports tools/test/handwriting_test.ts` |
 | Handwriting helper in the app | `deno test --allow-env tools/test/readHandwriting_test.ts` |
 | Gemini Edge Function | `deno test --allow-env supabase/functions/read-handwriting/handler_test.ts` |
 | Sheet scanner on realistic photos | see below |

@@ -1,0 +1,5 @@
+# Skora: Supabase settings kept in the repo.
+# read-handwriting checks the app's publishable key itself (apikey header),
+# because the new sb_publishable_ keys are not JWTs.
+[functions.read-handwriting]
+verify_jwt = false

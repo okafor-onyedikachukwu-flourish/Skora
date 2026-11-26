@@ -82,11 +82,16 @@ export default function ExamDetail() {
 
       <SectionTitle>After the exam</SectionTitle>
       <Group>
-        <ListRow icon="scan-outline" title="Scan scripts" subtitle="Comes in the next Skora build" />
+        <ListRow
+          icon="scan-outline"
+          title="Scan scripts"
+          subtitle="Photograph the Skora sheets; works without internet"
+          onPress={() => router.push({ pathname: '/exams/[id]/scan', params: { id: String(e.id) } })}
+        />
         <ListRow
           icon="bar-chart-outline"
           title="Saved scores"
-          subtitle={e.saved === 0 ? 'None yet' : `${e.saved} ${e.saved === 1 ? 'script' : 'scripts'} saved`}
+          subtitle={e.saved === 0 ? 'None yet' : `${e.saved} ${e.saved === 1 ? 'script' : 'scripts'} saved · reports come in the Scores tab soon`}
         />
       </Group>
 

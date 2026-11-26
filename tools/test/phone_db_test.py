@@ -149,4 +149,19 @@ k.execute(UPSERT, (1, 2, 'D', 3))       # same again: no change
 k.execute("DELETE FROM answer_keys WHERE exam_id = ? AND question_no = ?", (1, 3))
 assert k.execute("select score, max_score from saved_scripts").fetchone() == (4.0, 4.0)
 print("answer-key upsert and re-marking: ok")
+
+# The statements used by saveScript, suggestNames and recentSubjects in src/lib/db/scripts.ts.
+EXISTING = "SELECT id FROM saved_scripts WHERE exam_id = ? AND class_id = ? AND name_key = lower(trim(?))"
+assert k.execute(EXISTING, (1, 1, "  ADA ")).fetchone() is not None, "finds Ada however it is typed"
+assert k.execute(EXISTING, (1, 1, "Bola")).fetchone() is None
+k.execute("insert into class_names(class_id, full_name) values (1,'Adaeze Nwosu'),(1,'Bola Ade'),(1,'Chidi Ada')")
+SUGGEST = """SELECT full_name FROM name_suggestions
+      WHERE class_id = ? AND name_key LIKE '%' || ? || '%'
+      GROUP BY name_key ORDER BY instr(name_key, ?) , full_name COLLATE NOCASE LIMIT 6"""
+got = [r[0] for r in k.execute(SUGGEST, (1, "ada", "ada")).fetchall()]
+assert got[:2] == ["Ada", "Adaeze Nwosu"] and "Chidi Ada" in got and "Bola Ade" not in got, got
+k.execute("insert into saved_scripts(exam_id, class_id, student_name, subject, written_on, sheet_type, read_by, saved_at) values (1,1,'Bola Ade','English','2026-12-01','omr','phone','2099-01-01T00:00:00.000Z')")
+RECENT = "SELECT subject FROM saved_scripts GROUP BY lower(subject) ORDER BY max(saved_at) DESC LIMIT 8"
+assert [r[0] for r in k.execute(RECENT).fetchall()] == ["English", "Maths"], k.execute(RECENT).fetchall()
+print("save, duplicate check, name suggestions, recent subjects: ok")
 print("ALL PHONE DB TESTS PASSED")

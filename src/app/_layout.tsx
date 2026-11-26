@@ -60,6 +60,8 @@ function RootNavigator() {
         <Stack.Screen name="exams/[id]/edit" options={{ title: 'Edit exam' }} />
         <Stack.Screen name="exams/[id]/key" options={{ title: 'Answer key' }} />
         <Stack.Screen name="exams/[id]/sheets" options={{ title: 'Answer sheets' }} />
+        <Stack.Screen name="exams/[id]/scan" options={{ headerShown: false, animation: 'fade' }} />
+        <Stack.Screen name="exams/[id]/result" options={{ title: 'Result', gestureEnabled: false }} />
       </Stack.Protected>
     </Stack>
   );

@@ -15,7 +15,7 @@ Built with Expo (SDK 58) and Expo Router. The APK is built by GitHub Actions whe
 2. **Done:** Supabase clean-up, Gemini request limits, `read-handwriting` Edge Function
 3. **Done:** first-run screen, classes and class lists (typed, pasted, CSV or Excel), settings, backup and restore
 4. **Done:** exams, answer keys with marks per question, printable Skora answer sheets (no code on them)
-5. Scanning Skora sheets: camera, bubble reader, result screen, Save (name, subject, date) or Discard
+5. **Done:** scanning Skora sheets: camera or gallery, bubble reader on the phone, result screen with unclear answers to check, Save (name, subject, date) or Discard
 6. Handwriting: ML Kit reader, Gemini for unclear scripts, the waiting queue
 7. Scores: class summary, question analysis, spreadsheet export
 8. Test with real scripts, adjust the reading thresholds, release

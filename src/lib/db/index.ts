@@ -1,11 +1,11 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
-import { SCHEMA_V1 } from './schema';
+import { MIGRATE_1_TO_2, SCHEMA } from './schema';
 
 /** Skora's one database file, in the app's private SQLite folder. */
 export const DB_NAME = 'skora.db';
 
 /** The newest schema version this build of the app knows. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * Runs every time the database opens (SQLiteProvider onInit), and again after a restore.
@@ -17,12 +17,12 @@ export async function prepareDatabase(db: SQLiteDatabase) {
   if (version > SCHEMA_VERSION) {
     throw new Error('This data comes from a newer version of Skora. Update the app, then try again.');
   }
-  if (version < 1) {
-    await db.withTransactionAsync(async () => {
-      await db.execAsync(SCHEMA_V1);
-    });
-  }
-  // Later versions: if (version < 2) { ...SCHEMA_V2... }
+  if (version === SCHEMA_VERSION) return;
+  await db.withTransactionAsync(async () => {
+    if (version === 0) await db.execAsync(SCHEMA);
+    else if (version === 1) await db.execAsync(MIGRATE_1_TO_2);
+    // Later versions: else if (version === 2) await db.execAsync(MIGRATE_2_TO_3);
+  });
 }
 
 /** Turns a typed name into the form Skora stores: trimmed, with single spaces. */

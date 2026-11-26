@@ -1,16 +1,10 @@
 # Builds the Skora Android app (APK) on GitHub's servers and publishes it under Releases.
-# Runs on every change to the app's code, or by hand: Actions → Build APK → Run workflow.
+# Runs only when started by hand: Actions → Build APK → Run workflow.
 name: Build APK
 
 on:
+  # Builds start only by hand: Actions → Build APK → Run workflow. Pushing code never starts one.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'tools/**'
-      - 'supabase/**'
 
 permissions:
   contents: write

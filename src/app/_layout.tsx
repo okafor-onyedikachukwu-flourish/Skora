@@ -55,6 +55,11 @@ function RootNavigator() {
         <Stack.Screen name="classes/index" options={{ title: 'Your classes' }} />
         <Stack.Screen name="classes/[id]" options={{ title: 'Class' }} />
         <Stack.Screen name="classes/import" options={{ title: 'Add a class list', presentation: 'modal' }} />
+        <Stack.Screen name="exams/new" options={{ title: 'New exam', presentation: 'modal' }} />
+        <Stack.Screen name="exams/[id]/index" options={{ title: 'Exam' }} />
+        <Stack.Screen name="exams/[id]/edit" options={{ title: 'Edit exam' }} />
+        <Stack.Screen name="exams/[id]/key" options={{ title: 'Answer key' }} />
+        <Stack.Screen name="exams/[id]/sheets" options={{ title: 'Answer sheets' }} />
       </Stack.Protected>
     </Stack>
   );

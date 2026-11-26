@@ -1,8 +1,10 @@
-// Skora phone database, version 1 (SQLite). Run once, when PRAGMA user_version is 0.
-// Tested by tools/test/phone_db_test.py. Never edit version 1 once released:
-// add a SCHEMA_V2 with ALTER statements instead.
+// Skora phone database (SQLite). Current version: 2.
+//   SCHEMA          creates everything on a new phone (PRAGMA user_version 0).
+//   MIGRATE_1_TO_2  upgrades a phone that ran the first test build.
+// Tested by tools/test/phone_db_test.py. Never change a released version:
+// add the next MIGRATE_n_TO_m instead.
 
-export const SCHEMA_V1 = `
+const BASE = `
 -- ---------------------------------------------------------------------
 -- 1. Tables
 -- ---------------------------------------------------------------------
@@ -39,22 +41,20 @@ CREATE TABLE class_names (
   full_name  TEXT NOT NULL CHECK (length(trim(full_name)) BETWEEN 2 AND 120)
 );
 CREATE UNIQUE INDEX class_names_unique ON class_names (class_id, lower(trim(full_name)));
+`;
 
--- One row per exam paper.
---   question_count  1 to 100
+const EXAMS = `
+-- One row per exam paper: its answer key and the classes that write it.
+-- Subject and date are typed by the teacher on each saved script.
+--   question_count  1 to 100 (always one printed page)
 --   option_count    4 = A to D, 5 = A to E
 --   total_marks     kept equal to the sum of the key's marks (section 3)
---   sheet_code      printed in the QR code on this exam's Skora sheets
 CREATE TABLE exams (
   id              INTEGER PRIMARY KEY,
   title           TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 2 AND 120),
-  subject         TEXT NOT NULL CHECK (length(trim(subject)) BETWEEN 1 AND 80),
-  term            TEXT,                       -- e.g. First Term 2026/2027
-  exam_date       TEXT CHECK (exam_date IS NULL OR date(exam_date) IS exam_date),
   question_count  INTEGER NOT NULL CHECK (question_count BETWEEN 1 AND 100),
   option_count    INTEGER NOT NULL CHECK (option_count IN (4, 5)),
   total_marks     REAL NOT NULL DEFAULT 0,
-  sheet_code      TEXT NOT NULL UNIQUE DEFAULT (upper(hex(randomblob(4)))),
   archived        INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -79,6 +79,8 @@ CREATE TABLE answer_keys (
 --   student_name  typed by the teacher; the app trims it and turns
 --                 runs of spaces into one space before saving
 --   name_key      lower-case copy, so "Ada Obi" and "ada obi" match
+--   subject       typed by the teacher on Save, e.g. Mathematics
+--   written_on    the date of the exam, chosen on Save (YYYY-MM-DD)
 --   read_by       phone, gemini, or both
 --   score         set by the marking triggers, never by the app
 -- Removing a class from an exam also removes that class's saved
@@ -89,6 +91,8 @@ CREATE TABLE saved_scripts (
   class_id       INTEGER NOT NULL REFERENCES classes (id) ON DELETE RESTRICT,
   student_name   TEXT NOT NULL CHECK (length(trim(student_name)) BETWEEN 2 AND 120),
   name_key       TEXT GENERATED ALWAYS AS (lower(trim(student_name))) STORED,
+  subject        TEXT NOT NULL CHECK (length(trim(subject)) BETWEEN 1 AND 80),
+  written_on     TEXT NOT NULL CHECK (date(written_on) IS written_on),
   sheet_type     TEXT NOT NULL CHECK (sheet_type IN ('omr', 'handwritten')),
   read_by        TEXT NOT NULL CHECK (read_by IN ('phone', 'gemini', 'both')),
   score          REAL NOT NULL DEFAULT 0,
@@ -99,6 +103,7 @@ CREATE TABLE saved_scripts (
   FOREIGN KEY (exam_id, class_id) REFERENCES exam_classes (exam_id, class_id) ON DELETE CASCADE
 );
 CREATE INDEX saved_scripts_class ON saved_scripts (class_id);
+CREATE INDEX saved_scripts_subject ON saved_scripts (lower(subject));
 
 -- What was read for each question of a saved script.
 --   chosen  a letter, 'blank' (nothing chosen) or 'several' (more than one)
@@ -311,7 +316,7 @@ END;
 -- Every saved script with its percentage and position in the class.
 CREATE VIEW script_results AS
 SELECT s.id, s.exam_id, s.class_id, c.name AS class_name, s.student_name,
-       s.score, s.max_score,
+       s.subject, s.written_on, s.score, s.max_score,
        round(100.0 * s.score / nullif(s.max_score, 0), 1) AS percent,
        rank() OVER (PARTITION BY s.exam_id, s.class_id ORDER BY s.score DESC) AS position,
        s.sheet_type, s.read_by, s.teacher_fixes, s.saved_at
@@ -363,6 +368,26 @@ CREATE VIEW name_suggestions AS
 SELECT class_id, full_name, lower(trim(full_name)) AS name_key FROM class_names
 UNION
 SELECT class_id, student_name, name_key FROM saved_scripts;
+`;
 
-PRAGMA user_version = 1;
+export const SCHEMA = BASE + EXAMS + `
+PRAGMA user_version = 2;
+`;
+
+export const MIGRATE_1_TO_2 = `
+-- Version 1 was only in the first test build, which had no exam screens, so
+-- its exam tables are empty. Rebuild them in the version 2 shape; settings,
+-- classes and class lists are kept.
+DROP VIEW IF EXISTS name_suggestions;
+DROP VIEW IF EXISTS question_summary;
+DROP VIEW IF EXISTS exam_class_summary;
+DROP VIEW IF EXISTS script_results;
+DROP TABLE IF EXISTS scan_queue;
+DROP TABLE IF EXISTS saved_answers;
+DROP TABLE IF EXISTS saved_scripts;
+DROP TABLE IF EXISTS answer_keys;
+DROP TABLE IF EXISTS exam_classes;
+DROP TABLE IF EXISTS exams;
+` + EXAMS + `
+PRAGMA user_version = 2;
 `;

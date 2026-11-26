@@ -7,15 +7,15 @@ An Android app that helps a teacher mark objective exam scripts with her phone. 
 - **Data stays on the phone** in a SQLite database. Scores export to a spreadsheet; a backup file restores everything on a new phone.
 - **Supabase** (project "Zelvo") does one job: the `read-handwriting` Edge Function passes unclear handwriting to Gemini, so the Gemini key never sits in the APK.
 
-Built with Expo (SDK 58) and Expo Router. The APK is built by GitHub Actions and published under Releases; the app offers new builds itself.
+Built with Expo (SDK 58) and Expo Router. The APK is built by GitHub Actions when started by hand (Actions → Build APK → Run workflow) and published under Releases; the app offers new builds itself.
 
 ## Build stages
 
 1. **Done:** phone database (tables, checks, marking triggers, report views)
 2. **Done:** Supabase clean-up, Gemini request limits, `read-handwriting` Edge Function
 3. **Done:** first-run screen, classes and class lists (typed, pasted, CSV or Excel), settings, backup and restore
-4. Exams, answer keys with marks per question, printable Skora answer sheets
-5. Scanning Skora sheets: camera, bubble reader, result screen, Save or Discard
+4. **Done:** exams, answer keys with marks per question, printable Skora answer sheets (no code on them)
+5. Scanning Skora sheets: camera, bubble reader, result screen, Save (name, subject, date) or Discard
 6. Handwriting: ML Kit reader, Gemini for unclear scripts, the waiting queue
 7. Scores: class summary, question analysis, spreadsheet export
 8. Test with real scripts, adjust the reading thresholds, release
@@ -25,7 +25,8 @@ Built with Expo (SDK 58) and Expo Router. The APK is built by GitHub Actions and
 | Path | What |
 | --- | --- |
 | `src/app/` | Screens (Expo Router) |
-| `src/lib/db/` | Phone database: schema, settings, classes, backup |
+| `src/lib/db/` | Phone database: schema, settings, classes, exams and keys, backup |
+| `src/lib/sheet/` | Answer sheet layout and printing (see `docs/answer-sheet-layout.md`) |
 | `src/lib/readHandwriting.ts` | Calls `read-handwriting` and combines Gemini's answers with ML Kit's |
 | `src/lib/config.ts` | Supabase URL and publishable key (safe in the app) |
 | `supabase/` | Migration, Edge Function and `config.toml` |
@@ -38,6 +39,7 @@ npx tsc --noEmit                       # typecheck
 npx eslint src                         # lint
 python3 tools/test/phone_db_test.py    # phone database rules
 deno test --allow-env supabase/functions/read-handwriting/handler_test.ts tools/test/readHandwriting_test.ts
+deno test --sloppy-imports tools/test/sheet_test.ts
 ```
 
 ## Gemini

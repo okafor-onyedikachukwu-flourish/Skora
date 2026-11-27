@@ -42,21 +42,21 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/skora-emnist
-          key: emnist-byclass-v1
+          key: emnist-byclass-v2
 
       - name: Install
         run: pip install -r tools/model/requirements.txt
 
-      - name: Download EMNIST (about 560 MB, only the first time)
+      - name: Download EMNIST (only the first time)
         if: steps.emnist.outputs.cache-hit != 'true'
-        run: python -c "import sys; sys.path.insert(0, 'tools/model'); import emnist, os; emnist._download(os.path.expanduser('~/.cache/skora-emnist'))"
+        run: python -c "import sys; sys.path.insert(0, 'tools/model'); import emnist, os; emnist.ensure(os.path.expanduser('~/.cache/skora-emnist'))"
 
       - name: Keep the EMNIST download for next time
         if: steps.emnist.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/skora-emnist
-          key: emnist-byclass-v1
+          key: emnist-byclass-v2
 
       - name: Train and test
         run: |

@@ -8,10 +8,13 @@
  * anything else is left for Gemini or the teacher to check.
  */
 
+import { CROSSED, OTHER, classIndex } from '../reader/classes';
+
 export type Letter = 'A' | 'B' | 'C' | 'D' | 'E';
 
 /** The shapes the text reader returns (see modules/skora-text). Boxes are [left, top, right, bottom] in pixels. */
-export type WordIn = { text: string; box: number[]; confidence?: number };
+export type SymbolIn = { text: string; box: number[] };
+export type WordIn = { text: string; box: number[]; confidence?: number; symbols?: SymbolIn[] };
 export type LineIn = { text: string; box: number[]; confidence?: number; words: WordIn[] };
 export type PageIn = { width: number; height: number; lines: LineIn[] };
 
@@ -25,7 +28,9 @@ export type Why =
   | 'two-answers' // more than one answer for this question
   | 'out-of-order' // the number does not fit the numbers around it, so it may be misread
   | 'repeated-number' // the same number is written somewhere else on the script too
-  | 'not-an-option'; // E on an exam with options A to D
+  | 'not-an-option' // E on an exam with options A to D
+  | 'readers-disagree' // the text reader and Skora's own model read different letters
+  | 'crossed-out'; // the only answer written is crossed out
 
 export type PhoneAnswer = {
   q: number;
@@ -63,7 +68,18 @@ type Candidate = Placed & {
   /** Read from plain digits and a plain letter. */
   strict: boolean;
   box: Box;
+  /** Each letter written for this answer, as the text reader read it, and its box on the page. */
+  letters: { text: string; box: Box }[];
+  /** Each character of the question number, as read, and its box. */
+  digits: { text: string; box: Box }[];
 };
+
+/**
+ * Skora's own model, when the app has it: the probabilities (in READER_CLASSES order) for the
+ * character in a box of a page, or undefined when it was not read.
+ */
+export type Judge = (page: number, box: Box) => number[] | undefined;
+export const boxKey = (page: number, box: Box) => `${page}:${box.map((v) => Math.round(v)).join(',')}`;
 
 // Writing that is not an answer: the student's name, class, the date and so on. A number that
 // follows one of these words on the same line is ignored (so "Class: JSS 2A" is not question 2).
@@ -89,7 +105,7 @@ const LONE_NUMBER = /^\(?\s*([0-9]{1,3})\s*[.):-]?$/;
 const LONE_LETTER = /^\(?([A-Ea-e])[.)]?$/;
 
 /** Reads the answers for questions 1 to questionCount from the pages of one script, in page order. */
-export function findAnswers(pages: PageIn[], questionCount: number, optionCount: 4 | 5): HandwritingRead {
+export function findAnswers(pages: PageIn[], questionCount: number, optionCount: 4 | 5, judge?: Judge): HandwritingRead {
   const candidates: Candidate[] = [];
   const bare: Placed[] = []; // numbers with no answer beside them
   pages.forEach((page, p) => {
@@ -97,6 +113,7 @@ export function findAnswers(pages: PageIn[], questionCount: number, optionCount:
     candidates.push(...found.candidates);
     bare.push(...found.bare);
   });
+  if (judge) for (const c of candidates) judgeCandidate(c, judge, optionCount);
   // Numbers with no answer still show where questions are, so they help check the order.
   markOrder([...candidates, ...bare], pages);
   const bareQ = new Set(bare.map((b) => b.q));
@@ -143,6 +160,116 @@ export function findAnswers(pages: PageIn[], questionCount: number, optionCount:
   return { answers, found, clear: answers.filter((a) => a.clear).length };
 }
 
+/** Every box findAnswers will ask Skora's own model about: the letters and digits of each answer. */
+export function answerBoxes(pages: PageIn[], questionCount: number): { page: number; box: Box }[] {
+  const out = new Map<string, { page: number; box: Box }>();
+  pages.forEach((page, p) => {
+    for (const c of pageCandidates(page, p, questionCount).candidates) {
+      for (const x of [...c.letters, ...c.digits]) out.set(boxKey(p, x.box), { page: p, box: x.box });
+    }
+  });
+  return [...out.values()];
+}
+
+/** Sure enough of a character to count it as read. */
+const MODEL_SURE = 0.9;
+/** Sure enough to say the text reader got it wrong. */
+const MODEL_VERY_SURE = 0.97;
+
+function bestOf(probs: number[], options: string): { char: string; p: number } {
+  let char = options[0];
+  let p = -1;
+  for (const c of options) {
+    const v = probs[classIndex(c)] ?? 0;
+    if (v > p) {
+      char = c;
+      p = v;
+    }
+  }
+  return { char, p };
+}
+
+/**
+ * Two readers, the text reader and Skora's own model, look at every answer. Agreement makes an
+ * answer clear (even faint writing or a lookalike such as 8 for B); disagreement, a crossed-out
+ * letter or a doubtful question number sends it to Gemini or the teacher.
+ */
+function judgeCandidate(c: Candidate, judge: Judge, optionCount: 4 | 5) {
+  const allowed = optionCount === 5 ? 'ABCDE' : 'ABCD';
+  const letterReads = c.letters.map((l) => judge(c.page, l.box));
+  const digitReads = c.digits.map((d) => judge(c.page, d.box));
+  if (letterReads.some((r) => !r) || digitReads.some((r) => !r)) return; // no model: the text reader decides
+
+  // The question number: every digit must look like the digit the text reader saw.
+  let numberOk = true;
+  c.digits.forEach((d, i) => {
+    const r = digitReads[i]!;
+    const best = bestOf(r, '0123456789');
+    const asRead = /[0-9]/.test(d.text) ? d.text : d.text.replace(/[lI|!]/, '1').replace(/[Oo]/, '0');
+    if (best.char !== asRead && best.p >= MODEL_SURE) numberOk = false;
+    else if ((r[classIndex(asRead)] ?? 0) < 0.5) numberOk = false;
+  });
+
+  // Several letters ("12. A C"): crossed-out ones do not count.
+  if (c.letters.length > 1) {
+    const kept = c.letters.map((_, i) => i).filter((i) => letterReads[i]![CROSSED] < 0.5);
+    const crossed = letterReads.filter((r) => r![CROSSED] >= 0.8).length;
+    if (kept.length === 1 && crossed === c.letters.length - 1) {
+      const r = letterReads[kept[0]]!;
+      const best = bestOf(r, allowed);
+      const asRead = c.letters[kept[0]].text.toUpperCase();
+      if (best.p >= MODEL_SURE && best.char === asRead) {
+        c.chosen = best.char as Letter;
+        c.sure = c.strict && numberOk;
+        c.why = c.sure ? undefined : 'out-of-order';
+        return;
+      }
+    }
+    c.sure = false;
+    c.why = 'two-answers';
+    return;
+  }
+
+  const r = letterReads[0]!;
+  if (r[CROSSED] >= 0.8) {
+    c.sure = false;
+    c.why = 'crossed-out';
+    return;
+  }
+  const best = bestOf(r, allowed);
+  const asRead = c.chosen as Letter;
+  if (r[OTHER] >= 0.8 || (optionCount === 4 && (r[classIndex('E')] ?? 0) >= MODEL_SURE)) {
+    // Not one of the exam's letters at all (or an E on an A to D exam): someone should look.
+    c.sure = false;
+    c.why = r[OTHER] >= 0.8 ? 'readers-disagree' : 'not-an-option';
+    return;
+  }
+  if (best.char === asRead && best.p >= MODEL_SURE) {
+    // Both readers agree on the letter.
+    if (numberOk && (c.strict || c.digits.every((d) => /[0-9lI|!Oo]/.test(d.text)))) {
+      c.strict = true;
+      c.sure = true;
+      c.why = undefined;
+    } else {
+      c.sure = false;
+      c.why = 'out-of-order';
+    }
+    return;
+  }
+  if (best.char !== asRead && best.p >= MODEL_SURE) {
+    // The readers disagree: offer the model's letter when it is very sure, and let someone look.
+    if (!c.strict || best.p >= MODEL_VERY_SURE) c.chosen = best.char as Letter;
+    c.sure = false;
+    c.why = 'readers-disagree';
+    return;
+  }
+  // The model is unsure. A plain reading stands unless the model finds that letter unlikely.
+  if ((r[classIndex(asRead)] ?? 0) < 0.2 || !numberOk) {
+    c.sure = false;
+    c.why = numberOk ? 'readers-disagree' : 'out-of-order';
+  }
+}
+
 function sideBySide(group: Candidate[]) {
   for (let i = 0; i < group.length; i++) {
     for (let j = i + 1; j < group.length; j++) {
@@ -164,37 +291,60 @@ function toWhere(c: Candidate, page: PageIn): Where {
 }
 
 /** One line of text as a single string, remembering which word each character came from. */
-type LineText = { s: string; word: number[]; pos: number[]; words: WordIn[]; box: number[]; matched: boolean };
+type LineText = { s: string; word: number[]; pos: number[]; sym: (Box | null)[]; words: WordIn[]; box: number[]; matched: boolean };
 
 function lineText(line: LineIn): LineText {
   const words = line.words.length > 0 ? line.words : [{ text: line.text, box: line.box, confidence: line.confidence }];
   let s = '';
   const word: number[] = [];
   const pos: number[] = [];
+  const sym: (Box | null)[] = [];
   words.forEach((w, wi) => {
     if (wi > 0) {
       s += ' ';
       word.push(-1);
       pos.push(0);
+      sym.push(null);
     }
     const t = w.text.replace(/[‐-―−]/g, '-').replace(/[\r\n\t]/g, ' ');
+    // The text reader's box for each character, when it gave one per character.
+    const symbols = w.symbols && w.symbols.length === t.length && w.symbols.every((x) => x.box.length === 4) ? w.symbols : null;
     for (let k = 0; k < t.length; k++) {
       s += t[k];
       word.push(wi);
       pos.push(k);
+      sym.push(symbols ? (symbols[k].box as Box) : null);
     }
   });
   // "Q12. B" and "q12 B": drop the Q.
   s = s.replace(/(^|[^A-Za-z0-9])[Qq](?=\s*\d)/g, (_m, before: string) => `${before} `);
-  return { s, word, pos, words, box: line.box, matched: false };
+  return { s, word, pos, sym, words, box: line.box, matched: false };
 }
 
-/** The box around characters start..end of a line, sliced out of the word boxes. */
+/** The box around characters start..end of a line: the characters' own boxes, or sliced out of the word boxes. */
 function spanBox(lt: LineText, start: number, end: number): Box | null {
   let l = Infinity;
   let t = Infinity;
   let r = -Infinity;
   let b = -Infinity;
+  let all = end > start;
+  for (let i = start; i < end; i++) {
+    if (lt.word[i] < 0) continue;
+    const box = lt.sym[i];
+    if (!box) {
+      all = false;
+      break;
+    }
+    l = Math.min(l, box[0]);
+    t = Math.min(t, box[1]);
+    r = Math.max(r, box[2]);
+    b = Math.max(b, box[3]);
+  }
+  if (all && Number.isFinite(l)) return [l, t, r, b];
+  l = Infinity;
+  t = Infinity;
+  r = -Infinity;
+  b = -Infinity;
   const first = new Map<number, number>();
   const last = new Map<number, number>();
   for (let i = start; i < end; i++) {
@@ -288,6 +438,13 @@ function pageCandidates(page: PageIn, p: number, questionCount: number): { candi
         let strict = strictPass;
         let why: Why | undefined;
         let matchEnd = letterEnd;
+        // Where each letter is, for Skora's own model to read it too.
+        const letterSpans: [number, number][] = [];
+        if (strictPass) {
+          for (let k = 0; k < letterRaw.length; k++) if (/[A-Ea-e]/.test(letterRaw[k])) letterSpans.push([letterStart + k, letterStart + k + 1]);
+        } else {
+          letterSpans.push([letterStart, letterEnd]);
+        }
         if (strictPass) {
           const letters = letterRaw.toUpperCase().split(/[^A-E]+/).filter(Boolean);
           // "12. B A": a second letter on its own straight after the answer (a crossed-out letter
@@ -296,6 +453,8 @@ function pageCandidates(page: PageIn, p: number, questionCount: number): { candi
           if (extra) {
             letters.push(extra[1].toUpperCase());
             matchEnd = end + extra[0].length;
+            const at = end + extra[0].indexOf(extra[1]);
+            letterSpans.push([at, at + 1]);
           }
           chosen = new Set(letters).size > 1 ? 'several' : (letters[0] as Letter);
         } else {
@@ -318,6 +477,9 @@ function pageCandidates(page: PageIn, p: number, questionCount: number): { candi
         }
         const confident = spanConfidence(lt, numStart, letterEnd) >= MIN_CONFIDENCE;
         if (strict && !confident) why = 'faint';
+        const letterBoxes = letterSpans.map(([a, z]) => ({ text: text.slice(a, z), box: spanBox(lt, a, z) }));
+        const digitBoxes = [...numRaw].map((ch, k) => ({ text: ch, box: spanBox(lt, numStart + k, numStart + k + 1) }));
+        const ready = (xs: { text: string; box: Box | null }[]) => xs.every((x) => x.box) ? (xs as { text: string; box: Box }[]) : [];
 
         out.push({
           q,
@@ -327,11 +489,13 @@ function pageCandidates(page: PageIn, p: number, questionCount: number): { candi
           why,
           page: p,
           box,
+          letters: ready(letterBoxes),
+          digits: ready(digitBoxes),
           numLeft: numBox[0],
           cy: (box[1] + box[3]) / 2,
           h: Math.max(1, box[3] - box[1]),
           inOrder: true,
-      anchored: false,
+          anchored: false,
         });
         for (let i = numStart; i < matchEnd; i++) {
           if (lt.word[i] >= 0) usedWords.add(lt.words[lt.word[i]]);
@@ -395,6 +559,8 @@ function pageCandidates(page: PageIn, p: number, questionCount: number): { candi
       why: confident ? undefined : 'faint',
       page: p,
       box,
+      letters: [{ text: best.letter, box: best.box }],
+      digits: [],
       numLeft: n.box[0],
       cy: (box[1] + box[3]) / 2,
       h: Math.max(1, box[3] - box[1]),

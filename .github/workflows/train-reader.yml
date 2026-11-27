@@ -1,0 +1,103 @@
+# Trains Skora's own reader model (tools/model/train.py) on GitHub's servers and, if it passes
+# the accuracy bar on characters it never saw, saves it into the app:
+#   modules/skora-text/android/src/main/assets/skora-reader.tflite
+#   tools/model/report.json (how well it read the test characters)
+#   src/lib/reader/modelInfo.json (the short version the app shows in Settings)
+# Runs only when started by hand: Actions → Train reader model → Run workflow.
+# Then run Build APK to put the new model in the app.
+name: Train reader model
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: Training rounds (more is slower, and usually a little better)
+        default: "10"
+      per_class:
+        description: Examples of each digit and letter
+        default: "14000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: train-reader
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/model/requirements.txt
+
+      - name: Find the EMNIST download from an earlier run
+        id: emnist
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/skora-emnist
+          key: emnist-byclass-v1
+
+      - name: Install
+        run: pip install -r tools/model/requirements.txt
+
+      - name: Download EMNIST (about 560 MB, only the first time)
+        if: steps.emnist.outputs.cache-hit != 'true'
+        run: python -c "import sys; sys.path.insert(0, 'tools/model'); import emnist, os; emnist._download(os.path.expanduser('~/.cache/skora-emnist'))"
+
+      - name: Keep the EMNIST download for next time
+        if: steps.emnist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/skora-emnist
+          key: emnist-byclass-v1
+
+      - name: Train and test
+        run: |
+          python tools/model/train.py \
+            --out modules/skora-text/android/src/main/assets/skora-reader.tflite \
+            --report tools/model/report.json \
+            --info src/lib/reader/modelInfo.json \
+            --epochs "${{ inputs.epochs }}" \
+            --per-class "${{ inputs.per_class }}"
+
+      - name: Show the results
+        if: always()
+        run: |
+          if [ -f tools/model/report.json ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r = json.load(open("tools/model/report.json"))
+          t = r["test"]
+          print("## Skora reader model")
+          print(f"Passed the bar: **{'yes' if r['passed'] else 'no'}**  ")
+          print(f"Letters A–E: **{t['letters_A_to_E']:.2%}** · A–D: **{t['letters_A_to_D']:.2%}** · digits: **{t['digits']:.2%}**  ")
+          print(f"When it is sure ({t['letters_sure_share']:.0%} of letters): right {t['letters_when_sure']:.2%}  ")
+          print(f"{r['train_examples']} training and {r['test_examples']} test examples, {r['epochs']} rounds, {r['size_bytes'] // 1024} KB, {r['seconds'] // 60} min")
+          PY
+          fi
+
+      - name: Save the model in the app
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add modules/skora-text/android/src/main/assets/skora-reader.tflite tools/model/report.json src/lib/reader/modelInfo.json
+          LETTERS=$(python -c "import json; print(f\"{json.load(open('tools/model/report.json'))['test']['letters_A_to_E']:.1%}\")")
+          git commit -m "Train Skora's reader model (letters A-E ${LETTERS} on unseen test characters)"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: skora-reader
+          path: |
+            tools/model/report.json
+            modules/skora-text/android/src/main/assets/skora-reader.tflite
+          if-no-files-found: ignore

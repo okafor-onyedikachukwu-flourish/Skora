@@ -8,6 +8,8 @@ import { UpdateBanner } from '../../components/UpdateBanner';
 import { Banner, Button, Card, Field, Group, Input, ListRow, LoadingView, Screen, SectionTitle, confirm } from '../../components/ui';
 import { listClasses } from '../../lib/db/classes';
 import { readingAccuracy } from '../../lib/db/scripts';
+import { modelInfo } from '../../lib/reader/info';
+import { hasReader } from '../../lib/reader/reader';
 import { backUp, pickBackup, restore } from '../../lib/db/backup';
 import type { Settings } from '../../lib/db/settings';
 import { friendlyError } from '../../lib/errors';
@@ -33,6 +35,7 @@ function SettingsBody({ settings, justRestored, onRestored }: { settings: Settin
   const { update, reload: reloadSettings } = useSettings();
   const classes = useLoad(() => listClasses(db), 'classes');
   const accuracy = useLoad(() => readingAccuracy(db), 'accuracy');
+  const reader = useLoad(() => hasReader(), 'reader');
   const [teacherName, setTeacherName] = useState(settings.teacherName);
   const [schoolName, setSchoolName] = useState(settings.schoolName);
   const [passMark, setPassMark] = useState(String(settings.passMarkPercent));
@@ -159,6 +162,17 @@ function SettingsBody({ settings, justRestored, onRestored }: { settings: Settin
 
       <SectionTitle>How well Skora reads</SectionTitle>
       <Card>
+        <View style={{ marginBottom: space.sm }}>
+          <Text style={{ fontSize: 15, fontWeight: '600', color: colors.text }}>
+            {"Skora's own reader: "}
+            {reader.data && modelInfo ? 'on' : 'not in this version yet'}
+          </Text>
+          <Text style={{ fontSize: 13, color: colors.muted }}>
+            {reader.data && modelInfo
+              ? `Reads handwritten letters on the phone, checked against ML Kit. On ${modelInfo.testExamples} test characters it had never seen: letters ${(modelInfo.lettersAtoE * 100).toFixed(1)}% right, numbers ${(modelInfo.digits * 100).toFixed(1)}%. Trained ${modelInfo.trainedOn}.`
+              : 'Until it is trained and built into the app, ML Kit and Gemini read handwriting.'}
+          </Text>
+        </View>
         {accuracy.data && accuracy.data.length > 0 ? (
           accuracy.data.map((a) => {
             const right = a.answers > 0 ? Math.floor(((a.answers - a.changed) / a.answers) * 1000) / 10 : 100;

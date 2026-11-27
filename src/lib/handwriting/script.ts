@@ -10,7 +10,8 @@ import type { Settings } from '../db/settings';
 import { readHandwriting, type Photo } from '../readHandwriting';
 import { handwrittenAnswers } from '../scan/answers';
 import { deletePhoto, scansDir, type GeminiOutcome, type PendingScript, type ScriptPage } from '../scan/pending';
-import { findAnswers, writtenFields, type PageIn, type PhoneAnswer, type ReadFields } from './parse';
+import { classifyBoxes, hasReader, loadGray } from '../reader/reader';
+import { answerBoxes, boxKey, findAnswers, writtenFields, type Judge, type PageIn, type PhoneAnswer, type ReadFields } from './parse';
 
 /** Pages are kept at this many pixels on their longest side: sharp enough for the phone to read handwriting. */
 const PAGE_SIDE = 2000;
@@ -29,7 +30,27 @@ export async function preparePage(uri: string): Promise<PreparedPage> {
   return { uri: target.uri, width: saved.width, height: saved.height };
 }
 
-/** Reads the pages with the phone's own text reader. Null when this phone cannot read text. */
+/**
+ * Skora's own model reads every letter and digit of the answers the text reader found, so each
+ * answer is checked by two readers. Undefined when the app has no model (it then works as before).
+ */
+async function modelJudge(pages: ScriptPage[], read: PageIn[], questionCount: number): Promise<Judge | undefined> {
+  if (!(await hasReader())) return undefined;
+  const wanted = answerBoxes(read, questionCount);
+  const probs = new Map<string, number[]>();
+  for (let p = 0; p < pages.length; p++) {
+    const boxes = wanted.filter((w) => w.page === p);
+    if (boxes.length === 0) continue;
+    const gray = await loadGray(pages[p].uri);
+    if (!gray) return undefined;
+    const out = await classifyBoxes(gray, boxes.map((b) => b.box));
+    if (!out) return undefined;
+    boxes.forEach((b, i) => probs.set(boxKey(p, b.box), out[i]));
+  }
+  return (page, box) => probs.get(boxKey(page, box));
+}
+
+/** Reads the pages with the phone's own readers. Null when this phone cannot read text. */
 async function readOnPhone(pages: ScriptPage[], questionCount: number, optionCount: 4 | 5) {
   if (!canReadText) return null;
   try {
@@ -39,7 +60,8 @@ async function readOnPhone(pages: ScriptPage[], questionCount: number, optionCou
       if (!t) return null;
       read.push(t);
     }
-    return { ...findAnswers(read, questionCount, optionCount), fields: writtenFields(read[0]) as ReadFields };
+    const judge = await modelJudge(pages, read, questionCount).catch(() => undefined);
+    return { ...findAnswers(read, questionCount, optionCount, judge), fields: writtenFields(read[0]) as ReadFields };
   } catch {
     return null;
   }

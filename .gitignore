@@ -43,3 +43,4 @@ yarn-error.*
 # local env
 .env
 deno.lock
+__pycache__/

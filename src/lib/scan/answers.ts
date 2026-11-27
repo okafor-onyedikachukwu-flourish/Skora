@@ -36,10 +36,12 @@ const WHY: Record<Why, string> = {
   'out-of-order': 'The number may be misread.',
   'repeated-number': 'This number is written twice on the script.',
   'not-an-option': 'Read as E, but this exam has options A to D only.',
+  'readers-disagree': "The phone's two readers read different letters.",
+  'crossed-out': 'The answer is crossed out.',
 };
 
 // A guess Gemini can confirm or overrule: the letter itself was read, only less surely.
-const LETTER_GUESS = new Set<Why | undefined>(['lookalike', 'faint', 'two-answers']);
+const LETTER_GUESS = new Set<Why | undefined>(['lookalike', 'faint', 'two-answers', 'readers-disagree']);
 
 /**
  * The phone's reading of a handwritten script, with Gemini's when it was asked (null when not),

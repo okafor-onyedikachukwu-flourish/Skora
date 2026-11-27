@@ -235,3 +235,145 @@ Deno.test("name, class and subject boxes of a Skora sheet", () => {
   const f = boxFields(p, rows);
   assert(f.name === "Bello Aisha" && f.className === "SS 1" && f.subject === undefined, JSON.stringify(f));
 });
+
+// ---- With Skora's own model (simulated) ----
+import { boxKey, type Judge } from "../../src/lib/handwriting/parse.ts";
+import { READER_CLASSES } from "../../src/lib/reader/classes.ts";
+
+/** A line whose words carry one box per character, plus what each character really is. */
+function lineT(shown: string, truth: string, x: number, y: number, registry: Map<string, string>, page = 0, conf = 0.9): LineIn {
+  const l = line(shown, x, y, conf);
+  let pos = 0;
+  for (const w of l.words) {
+    const at = shown.indexOf(w.text, pos);
+    w.symbols = [...w.text].map((ch, k) => {
+      const box = [x + (at + k) * CW, y, x + (at + k + 1) * CW, y + LH];
+      registry.set(boxKey(page, box as [number, number, number, number]), truth[at + k]);
+      return { text: ch, box };
+    });
+    pos = at + w.text.length;
+  }
+  return l;
+}
+
+/** A good pseudo-random generator (mulberry32): consecutive draws do not depend on each other. */
+function mulberry(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A model that reads the true character: sure most of the time, sometimes unsure, rarely wrong. */
+function simulatedModel(registry: Map<string, string>, seed = 11, wrong = 0.02, unsure = 0.08): Judge {
+  const rand = mulberry(seed);
+  return (page, box) => {
+    const truth = registry.get(boxKey(page, box));
+    if (truth === undefined) return undefined;
+    const cls = truth === "X" ? "crossed" : /[0-9]/.test(truth) ? truth : /[A-Ea-e]/.test(truth) ? truth.toUpperCase() : "other";
+    const probs = READER_CLASSES.map(() => 0.002);
+    const i = READER_CLASSES.indexOf(cls as never);
+    const r = rand();
+    const sameKind = /[0-9]/.test(cls) ? "0123456789" : "ABCDE";
+    const other = READER_CLASSES.indexOf(sameKind[Math.floor(rand() * sameKind.length)] as never);
+    if (r < wrong && other !== i) probs[other] = 0.95;
+    else if (r < wrong + unsure) { probs[i] = 0.55; probs[other === i ? READER_CLASSES.indexOf("other") : other] = 0.35; }
+    else probs[i] = 0.97;
+    return probs;
+  };
+}
+
+Deno.test("two readers: agreement clears faint writing and lookalikes, disagreement is checked", () => {
+  const reg = new Map<string, string>();
+  const p = page([
+    lineT("1. A", "1. A", 120, 200, reg, 0, 0.3), // faint to the text reader, plain to the model
+    lineT("2. 8", "2. B", 120, 260, reg), // 8 read for B
+    lineT("3. C", "3. D", 120, 320, reg), // the text reader misread D as C
+    lineT("4. A C", "4. X C", 120, 380, reg), // A crossed out, C written
+    lineT("5. B", "5. B", 120, 440, reg),
+    lineT("6. E", "6. E", 120, 500, reg), // E on an A to D exam
+    lineT("7. D", "7. D", 120, 560, reg),
+  ]);
+  const sure: Judge = simulatedModel(reg, 1, 0, 0);
+  const a = findAnswers([p], 7, 4, sure).answers;
+  const s = a.map((x) => `${x.q}:${x.chosen ?? "_"}${x.clear ? "" : "?" + x.why}`).join(" ");
+  assert(s === "1:A 2:B 3:D?readers-disagree 4:C 5:B 6:_?not-an-option 7:D", s);
+  // Without the model, the same script needs more checking.
+  const alone = findAnswers([p], 7, 4).answers.filter((x) => x.clear).length;
+  assert(alone < a.filter((x) => x.clear).length, `model helps: ${alone} clear alone`);
+});
+
+Deno.test("two readers: a misread question number is caught", () => {
+  const reg = new Map<string, string>();
+  // 13 written, read as 18; it still sits in order between 12 and 19 with 14-17 missing.
+  const p = page([lineT("12. A", "12. A", 120, 200, reg), lineT("18. B", "13. B", 120, 260, reg), lineT("19. C", "19. C", 120, 320, reg)]);
+  const a = findAnswers([p], 19, 4, simulatedModel(reg, 2, 0, 0)).answers;
+  assert(!a[17].clear && a[17].why === "out-of-order", JSON.stringify(a[17]));
+  assert(a[18].clear, "19 stays clear");
+});
+
+// Here both readers make random mistakes on their own (the text reader 4% wrong letters and 6%
+// lookalikes, the model 2% wrong and 8% unsure), so now and then both are wrong the same way.
+// The bar: at most 1 in 1,000 clear answers wrong, and more answers clear than with one reader.
+Deno.test("made-up scripts with the model: clear answers are right, and more are clear", () => {
+  const rand = mulberry(23);
+  const pick = <T,>(xs: T[]) => xs[Math.floor(rand() * xs.length)];
+  const LOOK: Record<string, string> = { A: "4", B: "8", C: "(", D: "0", E: "€" };
+  let clearWith = 0, clearWithout = 0, total = 0, wrongWithout = 0;
+  const wrong: string[] = [];
+  for (let script = 0; script < 300; script++) {
+    const reg = new Map<string, string>();
+    const n = 10 + Math.floor(rand() * 51);
+    const options = rand() < 0.5 ? 4 : 5;
+    const letters = "ABCDE".slice(0, options);
+    const truth = Array.from({ length: n }, () => (rand() < 0.04 ? null : pick([...letters])));
+    const lines: LineIn[] = [];
+    truth.forEach((t, i) => {
+      const real = String(i + 1);
+      let shownNum = real;
+      if (rand() < 0.06) shownNum = real.replace(/\d(?!.*\d)/, String(Math.floor(rand() * 10)));
+      let shown: string, actual: string;
+      if (t === null) {
+        shown = `${shownNum}.`;
+        actual = `${real}.`;
+      } else {
+        let letter = rand() < 0.3 ? t.toLowerCase() : t;
+        let realLetter = letter;
+        if (rand() < 0.06) letter = LOOK[t]; // the text reader sees a lookalike
+        else if (rand() < 0.04) letter = pick([...letters].filter((x) => x !== t)); // or the wrong letter
+        if (rand() < 0.03) {
+          const first = pick([...letters]);
+          shown = `${shownNum}. ${first} ${letter}`;
+          actual = `${real}. X ${realLetter}`;
+        } else {
+          shown = `${shownNum}. ${letter}`;
+          actual = `${real}. ${realLetter}`;
+        }
+      }
+      if (shownNum.length !== real.length) { shownNum = real; shown = shown.replace(/^\d+/, real); }
+      const conf = rand() < 0.08 ? 0.3 : 0.9;
+      const rows = Math.ceil(n / 2);
+      lines.push(lineT(shown, actual, 100 + Math.floor(i / rows) * 500, 160 + (i % rows) * 44, reg, 0, conf));
+    });
+    const pg = page(lines);
+    const withModel = findAnswers([pg], n, options as 4 | 5, simulatedModel(reg, script + 5)).answers;
+    const without = findAnswers([pg], n, options as 4 | 5).answers;
+    withModel.forEach((a, i) => {
+      total++;
+      if (without[i].clear) {
+        clearWithout++;
+        if (without[i].chosen !== truth[i]) wrongWithout++;
+      }
+      if (!a.clear) return;
+      clearWith++;
+      if (a.chosen !== truth[i]) wrong.push(`script ${script} q${a.q}: read ${a.chosen}, wrote ${truth[i]}`);
+    });
+  }
+  console.log(`text reader alone: ${clearWithout} of ${total} clear, ${wrongWithout} of them wrong; with the model too: ${clearWith} clear, ${wrong.length} wrong`);
+  assert(wrong.length <= clearWith / 1000, `${wrong.length} wrong but clear:\n${wrong.slice(0, 10).join("\n")}`);
+  assert(clearWith > clearWithout, "the model should clear more answers");
+});

@@ -30,7 +30,9 @@ Built with Expo (SDK 58) and Expo Router. The APK is built by GitHub Actions whe
 | `src/lib/nameMatch.ts` | Matches the name read from a script to the class list (forgiving of misreadings) |
 | `src/lib/handwriting/` | Finds answers in the text ML Kit reads (`parse.ts`) and runs a handwritten script through the phone and Gemini (`script.ts`) |
 | `src/lib/readHandwriting.ts` | Calls `read-handwriting` and combines Gemini's answers with ML Kit's |
-| `modules/skora-text/` | Small native module: ML Kit text recognition on Android, with word boxes and confidence |
+| `modules/skora-text/` | Small native module: ML Kit text recognition (with word and character boxes), fast greyscale photos, and Skora's own reader model (LiteRT) |
+| `src/lib/reader/` | Prepares cut-outs of letters and digits for Skora's own model and runs it |
+| `tools/model/` | Trains Skora's own reader model (see tools/model/README.md) |
 | `src/lib/config.ts` | Supabase URL and publishable key (safe in the app) |
 | `supabase/` | Migration, Edge Function and `config.toml` |
 | `tools/` | Tests, and the script that draws the app icons |

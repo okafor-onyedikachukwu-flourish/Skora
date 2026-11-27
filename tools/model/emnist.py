@@ -14,6 +14,9 @@ import zipfile
 
 import numpy as np
 
+# The byclass labels: 0-9 digits, 10-35 A-Z, 36-61 a-z.
+CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
 # Where the EMNIST files can be fetched, tried in order. NIST's own server refuses many
 # downloads, so the mirrors come first:
 #   - Hugging Face, Heliosoph/EMNIST: NIST's files byte for byte, one file per split;

@@ -65,3 +65,13 @@ from train import CLASSES  # noqa: E402
 ts = open(os.path.join(os.path.dirname(__file__), "..", "..", "src", "lib", "reader", "classes.ts")).read()
 assert "[...'0123456789ABCDE', 'other', 'crossed']" in ts and CLASSES == list("0123456789ABCDE") + ["other", "crossed"], CLASSES
 print("model classes: training and the app agree")
+
+# A small training set from typed fonts, built the way training builds the real one (no TensorFlow
+# needed): catches mistakes in emnist.py, synth.py and train.py before a run on GitHub does.
+import emnist  # noqa: E402
+from train import build_set  # noqa: E402
+
+fx, fy, _, _ = emnist.fake(per_char=4)
+bx, by = build_set(fx, fy, per_class=6, n_other=8, n_crossed=4, seed=1, workers=1)
+assert bx.shape == (len(by), 32, 32, 1) and bx.dtype == np.uint8 and set(by) == set(range(len(CLASSES))), (bx.shape, set(by))
+print(f"training set: {len(by)} examples built, every class present")

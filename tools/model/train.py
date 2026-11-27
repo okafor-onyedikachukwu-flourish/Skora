@@ -48,8 +48,9 @@ def _work(job):
     return np.stack([sample(g, seed + i, crossed) for i, g in enumerate(glyphs)])
 
 
-def build_set(x, y, per_class: int, n_other: int, n_crossed: int, seed: int, workers: int):
-    """Augmented examples: per_class of each digit and letter, plus "other" and "crossed"."""
+def set_jobs(x, y, per_class: int, n_other: int, n_crossed: int, seed: int):
+    """The work for one set of augmented examples: per_class of each digit and letter, plus
+    "other" and "crossed". Returns (jobs for _work, the label of each example)."""
     rng = np.random.default_rng(seed)
     t = np.array([-1 if (v := target(int(l))) is None else v for l in y])
     jobs, labels = [], []
@@ -70,13 +71,71 @@ def build_set(x, y, per_class: int, n_other: int, n_crossed: int, seed: int, wor
     answer_pool = np.nonzero(t >= 0)[0]
     answer_pool = answer_pool[t[answer_pool] != OTHER]
     add(list(x[rng.choice(answer_pool, n_crossed)]), CROSSED, crossed=True)
+    return jobs, np.concatenate(labels)
 
+
+def finish_set(parts, labels, seed: int):
+    xs = np.concatenate(parts)[..., None]
+    order = np.random.default_rng(seed).permutation(len(labels))
+    return xs[order], labels[order]
+
+
+def build_set(x, y, per_class: int, n_other: int, n_crossed: int, seed: int, workers: int):
+    """One set of augmented examples, made now (used by tools/test/normalize_test.py)."""
+    jobs, labels = set_jobs(x, y, per_class, n_other, n_crossed, seed)
     with mp.Pool(workers) as pool:
         parts = pool.map(_work, jobs, chunksize=1)
-    xs = np.concatenate(parts)[..., None]
-    ys = np.concatenate(labels)
-    order = rng.permutation(len(ys))
-    return xs[order], ys[order]
+    return finish_set(parts, labels, seed)
+
+
+class Maker:
+    """Makes sets of examples in worker processes, so the next round's set can be made while the
+    model trains on this one. Start it before TensorFlow is imported (the workers are forked)."""
+
+    def __init__(self, workers: int):
+        self.pool = mp.Pool(workers)
+
+    def start(self, x, y, per_class, n_other, n_crossed, seed):
+        jobs, labels = set_jobs(x, y, per_class, n_other, n_crossed, seed)
+        return self.pool.map_async(_work, jobs, chunksize=1), labels, seed
+
+    @staticmethod
+    def get(started):
+        job, labels, seed = started
+        return finish_set(job.get(), labels, seed)
+
+    def close(self):
+        self.pool.close()
+        self.pool.join()
+
+
+def Rounds(first, make_next, epochs: int, batch: int = 256):
+    """The training data, a fresh set for every round: other characters from EMNIST, and new
+    paper, pens, blur and cut-outs. With one set seen ten times the model learnt those exact
+    pictures by heart (98% right on them, but 95% on the test characters). The next round's set
+    is made in the background while the model trains on this one."""
+    from tensorflow import keras
+
+    class _Rounds(keras.utils.PyDataset):
+        def __init__(self):
+            super().__init__()
+            self.x, self.y = first
+            self.round = 0
+            self.upcoming = make_next(1) if epochs > 1 else None
+
+        def __len__(self):
+            return int(np.ceil(len(self.y) / batch))
+
+        def __getitem__(self, i):
+            return self.x[i * batch:(i + 1) * batch], self.y[i * batch:(i + 1) * batch]
+
+        def on_epoch_begin(self):  # Keras calls this once at the start of every round
+            if self.round > 0 and self.upcoming is not None:
+                self.x, self.y = Maker.get(self.upcoming)
+                self.upcoming = make_next(self.round + 1) if self.round + 1 < epochs else None
+            self.round += 1
+
+    return _Rounds()
 
 
 def build_model(n_classes: int):
@@ -139,11 +198,13 @@ def main():
 
     trx, try_, tex, tey = emnist.fake() if args.fake else emnist.load(args.cache)
     print(f"characters: {len(try_)} to learn from, {len(tey)} kept apart for testing", flush=True)
+    maker = Maker(args.workers)  # before TensorFlow, so its workers are forked without it
     n = args.per_class
-    x, y = build_set(trx, try_, n, n_other=int(n * 1.5), n_crossed=n, seed=1, workers=args.workers)
+    train_set = lambda r: maker.start(trx, try_, n, int(n * 1.5), n, seed=1 + 1000 * r)  # noqa: E731
     k = args.test_per_class
-    vx, vy = build_set(tex, tey, k, n_other=k, n_crossed=k, seed=2, workers=args.workers)
-    print(f"examples: {len(y)} for training, {len(vy)} for testing ({time.time() - started:.0f} s)", flush=True)
+    vx, vy = Maker.get(maker.start(tex, tey, k, k, k, seed=2))
+    x, y = Maker.get(train_set(0))
+    print(f"examples: {len(y)} for training each round, {len(vy)} for testing ({time.time() - started:.0f} s)", flush=True)
 
     model, tf = build_model(len(CLASSES))
     steps = int(np.ceil(len(y) / 256)) * args.epochs
@@ -153,7 +214,8 @@ def main():
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
         metrics=["accuracy"],
     )
-    model.fit(x, y, batch_size=256, epochs=args.epochs, validation_data=(vx, vy), verbose=2)
+    model.fit(Rounds((x, y), train_set, args.epochs), epochs=args.epochs, validation_data=(vx, vy), verbose=2)
+    maker.close()
 
     keras_metrics = metrics(model.predict(vx, batch_size=1024, verbose=0), vy)
     converter = tf.lite.TFLiteConverter.from_keras_model(model)

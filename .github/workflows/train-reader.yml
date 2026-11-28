@@ -80,6 +80,15 @@ jobs:
           print(f"Letters A–E: **{t['letters_A_to_E']:.2%}** · A–D: **{t['letters_A_to_D']:.2%}** · digits: **{t['digits']:.2%}**  ")
           print(f"When it is sure ({t['letters_sure_share']:.0%} of letters): right {t['letters_when_sure']:.2%}  ")
           print(f"{r['train_examples']} training and {r['test_examples']} test examples, {r['epochs']} rounds, {r['size_bytes'] // 1024} KB, {r['seconds'] // 60} min")
+          d = t.get("letters_A_to_E_detail")
+          if d:
+              print("\n### Letters A–E, capital and small")
+              print("| Letter | Right |\n|---|---|")
+              for ch, v in d["by_character"].items():
+                  print(f"| {ch} | {v['right']:.1%} |")
+              print("\n### Most common mix-ups")
+              for k, n in d["mixups"].items():
+                  print(f"- {k}: {n}")
           PY
           fi
 

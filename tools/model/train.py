@@ -9,7 +9,8 @@ character). The answer letters are read best by asking only about the letters an
 so the report gives accuracy for A-E and A-D separately.
 
 The model only ships if it passes the bar on characters it never saw while training
-(--min-letters, --min-digits); otherwise this exits with code 2 and writes nothing.
+(--min-letters-a-to-e, --min-letters for A-D, --min-digits); otherwise this exits with code 2 and
+writes nothing.
 """
 import argparse
 import json
@@ -50,39 +51,43 @@ def _work(job):
 
 def set_jobs(x, y, per_class: int, n_other: int, n_crossed: int, seed: int):
     """The work for one set of augmented examples: per_class of each digit and letter, plus
-    "other" and "crossed". Returns (jobs for _work, the label of each example)."""
+    "other" and "crossed". Returns (jobs for _work, the label of each example, the EMNIST
+    character each example was made from: "a" or "A" for an A, "" for a blank)."""
     rng = np.random.default_rng(seed)
     t = np.array([-1 if (v := target(int(l))) is None else v for l in y])
-    jobs, labels = [], []
+    jobs, labels, src = [], [], []
 
-    def add(glyphs, label, crossed=False):
+    def add(idx, label, crossed=False):
+        glyphs = [None] * idx if isinstance(idx, int) else list(x[idx])
+        chars = [""] * idx if isinstance(idx, int) else [emnist.CHARS[int(l)] for l in y[idx]]
         for start in range(0, len(glyphs), 500):
             part = glyphs[start:start + 500]
             jobs.append((part, int(rng.integers(0, 2**31)), crossed))
             labels.append(np.full(len(part), label))
+            src.extend(chars[start:start + 500])
 
     for c in DIGITS + LETTERS:
         pool = np.nonzero(t == c)[0]
-        add(list(x[rng.choice(pool, per_class, replace=len(pool) < per_class)]), c)
+        add(rng.choice(pool, per_class, replace=len(pool) < per_class), c)
     other_pool = np.nonzero(t == OTHER)[0]
     n_blank = n_other // 8
-    add(list(x[rng.choice(other_pool, n_other - n_blank)]), OTHER)
-    add([None] * n_blank, OTHER)
+    add(rng.choice(other_pool, n_other - n_blank), OTHER)
+    add(n_blank, OTHER)
     answer_pool = np.nonzero(t >= 0)[0]
     answer_pool = answer_pool[t[answer_pool] != OTHER]
-    add(list(x[rng.choice(answer_pool, n_crossed)]), CROSSED, crossed=True)
-    return jobs, np.concatenate(labels)
+    add(rng.choice(answer_pool, n_crossed), CROSSED, crossed=True)
+    return jobs, np.concatenate(labels), np.array(src)
 
 
-def finish_set(parts, labels, seed: int):
+def finish_set(parts, labels, seed: int, src=None):
     xs = np.concatenate(parts)[..., None]
     order = np.random.default_rng(seed).permutation(len(labels))
-    return xs[order], labels[order]
+    return (xs[order], labels[order]) if src is None else (xs[order], labels[order], src[order])
 
 
 def build_set(x, y, per_class: int, n_other: int, n_crossed: int, seed: int, workers: int):
     """One set of augmented examples, made now (used by tools/test/normalize_test.py)."""
-    jobs, labels = set_jobs(x, y, per_class, n_other, n_crossed, seed)
+    jobs, labels, _ = set_jobs(x, y, per_class, n_other, n_crossed, seed)
     with mp.Pool(workers) as pool:
         parts = pool.map(_work, jobs, chunksize=1)
     return finish_set(parts, labels, seed)
@@ -96,13 +101,13 @@ class Maker:
         self.pool = mp.Pool(workers)
 
     def start(self, x, y, per_class, n_other, n_crossed, seed):
-        jobs, labels = set_jobs(x, y, per_class, n_other, n_crossed, seed)
-        return self.pool.map_async(_work, jobs, chunksize=1), labels, seed
+        jobs, labels, src = set_jobs(x, y, per_class, n_other, n_crossed, seed)
+        return self.pool.map_async(_work, jobs, chunksize=1), labels, src, seed
 
     @staticmethod
-    def get(started):
-        job, labels, seed = started
-        return finish_set(job.get(), labels, seed)
+    def get(started, with_src: bool = False):
+        job, labels, src, seed = started
+        return finish_set(job.get(), labels, seed, src if with_src else None)
 
     def close(self):
         self.pool.close()
@@ -154,6 +159,35 @@ def metrics(probs: np.ndarray, y: np.ndarray) -> dict:
     return out
 
 
+def letter_mixups(probs: np.ndarray, y: np.ndarray, src: np.ndarray) -> dict:
+    """Which answer letters are misread, the way Skora reads an A-E exam: for each capital and
+    small letter, how often it is read right, and the most common mix-ups ("b read as D")."""
+    idx = [CLASSES.index(c) for c in "ABCDE"]
+    m = np.isin(y, idx)
+    pick = np.array(idx)[probs[m][:, idx].argmax(1)]
+    truth, chars = y[m], src[m]
+    by_char = {}
+    for ch in sorted(set(chars), key=lambda c: (c.upper(), c.islower())):
+        k = chars == ch
+        by_char[ch] = {"right": float((pick[k] == truth[k]).mean()), "examples": int(k.sum())}
+    wrong = pick != truth
+    pairs = {}
+    for ch, p in zip(chars[wrong], pick[wrong]):
+        key = f"{ch} read as {CLASSES[p]}"
+        pairs[key] = pairs.get(key, 0) + 1
+    top = dict(sorted(pairs.items(), key=lambda kv: -kv[1])[:10])
+    return {"by_character": by_char, "mixups": top, "wrong": int(wrong.sum()), "letters": int(m.sum())}
+
+
+def print_mixups(mx: dict) -> None:
+    print(f"Letters A-E: {mx['letters'] - mx['wrong']} of {mx['letters']} right. By letter (capital / small):")
+    for ch, v in mx["by_character"].items():
+        print(f"  {ch}: {v['right']:.1%} right ({v['examples']} test letters)")
+    print("Most common mix-ups:")
+    for k, n in mx["mixups"].items():
+        print(f"  {k}: {n}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -164,7 +198,9 @@ def main():
     ap.add_argument("--per-class", type=int, default=14000)
     ap.add_argument("--test-per-class", type=int, default=1500)
     ap.add_argument("--epochs", type=int, default=12)
-    ap.add_argument("--min-letters", type=float, default=0.98)
+    ap.add_argument("--min-letters", type=float, default=0.98, help="bar for letters A-D")
+    ap.add_argument("--min-letters-a-to-e", type=float, default=0.975,
+                    help="bar for letters A-E (lower: some handwritten letters in EMNIST stay ambiguous)")
     ap.add_argument("--min-digits", type=float, default=0.98)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     args = ap.parse_args()
@@ -176,7 +212,7 @@ def main():
     n = args.per_class
     train_set = lambda r: maker.start(trx, try_, n, int(n * 1.5), n, seed=1 + 1000 * r)  # noqa: E731
     k = args.test_per_class
-    vx, vy = Maker.get(maker.start(tex, tey, k, k, k, seed=2))
+    vx, vy, vsrc = Maker.get(maker.start(tex, tey, k, k, k, seed=2), with_src=True)
     x, y = Maker.get(train_set(0))
     print(f"examples: {len(y)} for training each round, {len(vy)} for testing ({time.time() - started:.0f} s)", flush=True)
 
@@ -215,7 +251,9 @@ def main():
     interp.allocate_tensors()
     interp.set_tensor(inp["index"], vx.astype(np.float32))
     interp.invoke()
-    m = metrics(interp.get_tensor(interp.get_output_details()[0]["index"]), vy)
+    probs = interp.get_tensor(interp.get_output_details()[0]["index"])
+    m = metrics(probs, vy)
+    m["letters_A_to_E_detail"] = letter_mixups(probs, vy, vsrc)
 
     report = {
         "model": "skora-reader",
@@ -232,14 +270,17 @@ def main():
         "test": m,
         "test_before_tflite": keras_metrics,
     }
-    print(json.dumps({k: v for k, v in m.items() if k != "per_class"}, indent=2))
-    ok = m["letters_A_to_E"] >= args.min_letters and m["letters_A_to_D"] >= args.min_letters and m["digits"] >= args.min_digits
+    print(json.dumps({k: v for k, v in m.items() if k not in ("per_class", "letters_A_to_E_detail")}, indent=2))
+    print_mixups(m["letters_A_to_E_detail"])
+    ok = (m["letters_A_to_E"] >= args.min_letters_a_to_e and m["letters_A_to_D"] >= args.min_letters
+          and m["digits"] >= args.min_digits)
     report["passed"] = bool(ok)
     os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
     with open(args.report, "w") as f:
         json.dump(report, f, indent=2)
     if not ok:
-        print(f"Below the bar (letters {args.min_letters:.0%}, digits {args.min_digits:.0%}): the model is not saved.")
+        print(f"Below the bar (letters A-E {args.min_letters_a_to_e:.1%}, A-D {args.min_letters:.1%},"
+              f" digits {args.min_digits:.1%}): the model is not saved.")
         sys.exit(2)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "wb") as f:

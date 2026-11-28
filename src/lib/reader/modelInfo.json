@@ -1,3 +1,9 @@
 {
-  "version": null
+  "version": "202611281031",
+  "trainedOn": "2026-11-28",
+  "data": "EMNIST byclass (NIST)",
+  "lettersAtoE": 0.9795,
+  "lettersAtoD": 0.9872,
+  "digits": 0.9867,
+  "testExamples": 25500
 }

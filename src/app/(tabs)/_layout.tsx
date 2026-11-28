@@ -1,6 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
 import { Tabs } from 'expo-router/tabs';
-import { colors } from '../../components/theme';
+import { Pressable, StyleSheet, Text } from 'react-native';
+import { colors, radius, space } from '../../components/theme';
 
 export default function TabsLayout() {
   return (
@@ -20,6 +22,16 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: 'Exams',
+          headerRight: () => (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push('/exams/new')}
+              style={({ pressed }) => [styles.newExam, pressed && { opacity: 0.7 }]}
+            >
+              <Ionicons name="add" size={18} color={colors.primary} />
+              <Text style={styles.newExamText}>New exam</Text>
+            </Pressable>
+          ),
           tabBarIcon: ({ color, size, focused }) => <Ionicons name={focused ? 'document-text' : 'document-text-outline'} color={color as string} size={size} />,
         }}
       />
@@ -47,3 +59,19 @@ export default function TabsLayout() {
     </Tabs>
   );
 }
+
+const styles = StyleSheet.create({
+  newExam: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    minHeight: 40,
+    paddingHorizontal: 14,
+    marginRight: space.lg,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+  },
+  newExamText: { fontSize: 14, fontWeight: '700', color: colors.primary },
+});

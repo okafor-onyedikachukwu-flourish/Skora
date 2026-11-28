@@ -1,30 +1,39 @@
+import { Ionicons } from '@expo/vector-icons';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useSQLiteContext } from 'expo-sqlite';
-import { useState } from 'react';
-import { Text, View } from 'react-native';
-import { colors, space } from '../../../components/theme';
-import { Banner, Button, Card, ErrorView, Group, ListRow, LoadingView, Screen, SectionTitle, confirm } from '../../../components/ui';
+import { useState, type ReactNode } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ProgressBar } from '../../../components/scores';
+import { colors, radius, space } from '../../../components/theme';
+import { Banner, Button, Card, ErrorView, LoadingView, Screen, SectionTitle, confirm } from '../../../components/ui';
 import { deleteExam, getExam } from '../../../lib/db/exams';
+import { examSummaries, formatPercent } from '../../../lib/db/scores';
 import { friendlyError } from '../../../lib/errors';
 import { formatMarks, optionsLabel } from '../../../lib/exams';
+import { useSettings } from '../../../lib/settings';
 import { useLoad } from '../../../lib/useLoad';
 
+/** One exam, as steps: answer key, answer sheets, scan, scores. */
 export default function ExamDetail() {
   const { id: idParam } = useLocalSearchParams<{ id: string }>();
   const id = Number(idParam);
   const db = useSQLiteContext();
-  const { data: exam, loading, error, reload } = useLoad(async () => {
+  const { settings } = useSettings();
+  const passMark = settings?.passMarkPercent ?? 50;
+  const { data, loading, error, reload } = useLoad(async () => {
     const e = await getExam(db, id);
     if (!e) throw new Error('This exam was deleted.');
-    return e;
-  }, idParam);
+    const summary = (await examSummaries(db, passMark)).find((s) => s.examId === id) ?? null;
+    return { exam: e, summary };
+  }, `${idParam}:${passMark}`);
   const [message, setMessage] = useState<string | null>(null);
 
   if (loading) return <LoadingView />;
-  if (error && !exam) return <ErrorView message={error} onRetry={reload} />;
-  const e = exam!;
+  if (error && !data) return <ErrorView message={error} onRetry={reload} />;
+  const { exam: e, summary } = data!;
   const keyDone = e.keySet === e.questionCount;
-  const go = (path: '/exams/[id]/key' | '/exams/[id]/sheets' | '/exams/[id]/edit') => router.push({ pathname: path, params: { id: String(e.id) } });
+  const params = { id: String(e.id) };
+  const listSize = summary?.listSize ?? 0;
 
   async function remove() {
     const extra = e.saved > 0 ? ` and ${e.saved} saved ${e.saved === 1 ? 'score' : 'scores'}` : '';
@@ -37,76 +46,157 @@ export default function ExamDetail() {
     }
   }
 
+  const scanNote =
+    e.saved === 0
+      ? 'Photograph each script; works without internet'
+      : listSize > e.saved
+        ? `${e.saved} of ${listSize} students saved · works without internet`
+        : `${e.saved} saved · works without internet`;
+
   return (
     <Screen>
       <Stack.Screen options={{ title: e.title }} />
       {message ? <Banner tone="danger" icon="alert-circle" title={message} /> : null}
 
       <Card>
-        <Text style={{ fontSize: 20, fontWeight: '800', color: colors.text }}>{e.title}</Text>
+        <Text style={styles.title}>{e.title}</Text>
         <Text style={{ fontSize: 15, color: colors.text, marginTop: 4 }}>{e.classes.map((c) => c.name).join(', ')}</Text>
-        <Text style={{ fontSize: 14, color: colors.muted, marginTop: 4 }}>
+        <Text style={styles.muted}>
           {e.questionCount} questions · options {optionsLabel(e.optionCount)}
           {e.keySet > 0 ? ` · ${formatMarks(e.totalMarks)} in all` : ''}
         </Text>
       </Card>
 
-      {!keyDone ? (
-        <View style={{ marginTop: space.md }}>
-          <Banner
-            tone="warning"
-            icon="key-outline"
-            title={e.keySet === 0 ? 'Set the answer key first' : `${e.questionCount - e.keySet} questions still need an answer`}
-            text="Skora marks every script against the key."
-            action={<Button small title="Set the answer key" onPress={() => go('/exams/[id]/key')} />}
+      <SectionTitle>Steps</SectionTitle>
+
+      <Step n={1} done={keyDone} current={!keyDone}>
+        <StepRow
+          title="Answer key and marks"
+          note={keyDone ? `All ${e.questionCount} answers set · ${formatMarks(e.totalMarks)}` : `${e.keySet} of ${e.questionCount} answers set`}
+          onPress={() => router.push({ pathname: '/exams/[id]/key', params })}
+          highlight={!keyDone}
+        >
+          {!keyDone ? <ProgressBar value={e.questionCount ? e.keySet / e.questionCount : 0} /> : null}
+        </StepRow>
+      </Step>
+
+      <Step n={2} done={keyDone}>
+        <StepRow
+          title="Answer sheets"
+          optional
+          note="Print Skora bubble sheets, or use any paper"
+          onPress={() => router.push({ pathname: '/exams/[id]/sheets', params })}
+        />
+      </Step>
+
+      <Step n={3} done={false} current={keyDone}>
+        <View style={[styles.stepCard, keyDone && styles.stepCardOn]}>
+          <Text style={styles.stepTitle}>Scan scripts</Text>
+          <Text style={styles.stepNote}>{scanNote}</Text>
+          {listSize > 0 && e.saved > 0 ? (
+            <View style={{ marginTop: space.sm }}>
+              <ProgressBar value={e.saved / listSize} />
+            </View>
+          ) : null}
+          {!keyDone ? (
+            <Text style={[styles.stepNote, { color: colors.warning, marginTop: space.sm }]}>Finish the answer key first, so Skora can mark every question.</Text>
+          ) : null}
+          <Button
+            icon="camera-outline"
+            variant={keyDone ? 'primary' : 'secondary'}
+            title={e.saved > 0 ? 'Scan next script' : 'Start scanning'}
+            onPress={() => router.push({ pathname: '/exams/[id]/scan', params })}
+            style={{ marginTop: space.md }}
           />
         </View>
-      ) : null}
+      </Step>
 
-      <SectionTitle>Before the exam</SectionTitle>
-      <Group>
-        <ListRow
-          icon="key-outline"
-          title="Answer key and marks"
-          subtitle={keyDone ? `All ${e.questionCount} answers set · ${formatMarks(e.totalMarks)}` : `${e.keySet} of ${e.questionCount} answers set`}
-          right={<Progress value={e.questionCount ? e.keySet / e.questionCount : 0} />}
-          onPress={() => go('/exams/[id]/key')}
+      <Step n={4} done={false} last>
+        <StepRow
+          title="Scores"
+          note={
+            e.saved === 0
+              ? 'None saved yet'
+              : `Average ${formatPercent(summary?.averagePercent ?? null)} · ${summary?.passed ?? 0} of ${e.saved} passed`
+          }
+          action={e.saved > 0 ? 'See all' : undefined}
+          onPress={e.saved > 0 ? () => router.push({ pathname: '/exams/[id]/scores', params }) : undefined}
         />
-        <ListRow
-          icon="print-outline"
-          title="Answer sheets (optional)"
-          subtitle="Print Skora bubble sheets, or let students write answers on any paper"
-          onPress={() => go('/exams/[id]/sheets')}
-        />
-      </Group>
-
-      <SectionTitle>After the exam</SectionTitle>
-      <Group>
-        <ListRow
-          icon="scan-outline"
-          title="Scan scripts"
-          subtitle="Photograph the Skora sheets; works without internet"
-          onPress={() => router.push({ pathname: '/exams/[id]/scan', params: { id: String(e.id) } })}
-        />
-        <ListRow
-          icon="bar-chart-outline"
-          title="Saved scores"
-          subtitle={e.saved === 0 ? 'None yet' : `${e.saved} ${e.saved === 1 ? 'script' : 'scripts'} saved · reports come in the Scores tab soon`}
-        />
-      </Group>
+      </Step>
 
       <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.xl }}>
-        <Button variant="secondary" icon="create-outline" title="Edit" onPress={() => go('/exams/[id]/edit')} style={{ flex: 1 }} />
+        <Button variant="secondary" icon="create-outline" title="Edit" onPress={() => router.push({ pathname: '/exams/[id]/edit', params })} style={{ flex: 1 }} />
         <Button variant="danger" icon="trash-outline" title="Delete" onPress={remove} style={{ flex: 1 }} />
       </View>
     </Screen>
   );
 }
 
-function Progress({ value }: { value: number }) {
+/** A numbered step with a line down to the next one. */
+function Step({ n, done, current, last, children }: { n: number; done: boolean; current?: boolean; last?: boolean; children: ReactNode }) {
   return (
-    <View style={{ width: 56, height: 6, borderRadius: 3, backgroundColor: colors.border, overflow: 'hidden' }}>
-      <View style={{ width: `${Math.round(value * 100)}%`, height: 6, backgroundColor: value >= 1 ? colors.success : colors.primary }} />
+    <View style={{ flexDirection: 'row', gap: space.md }}>
+      <View style={{ width: 32, alignItems: 'center' }}>
+        <View style={[styles.dot, done ? { backgroundColor: colors.success } : current ? { backgroundColor: colors.primary } : { backgroundColor: colors.primarySoft }]}>
+          {done ? (
+            <Ionicons name="checkmark" size={18} color="#FFFFFF" />
+          ) : (
+            <Text style={{ fontSize: 15, fontWeight: '800', color: current ? '#FFFFFF' : colors.primary }}>{n}</Text>
+          )}
+        </View>
+        {!last ? <View style={styles.line} /> : null}
+      </View>
+      <View style={{ flex: 1, paddingBottom: last ? 0 : space.md }}>{children}</View>
     </View>
   );
 }
+
+function StepRow({
+  title,
+  note,
+  optional,
+  action,
+  highlight,
+  onPress,
+  children,
+}: {
+  title: string;
+  note: string;
+  optional?: boolean;
+  action?: string;
+  highlight?: boolean;
+  onPress?: () => void;
+  children?: ReactNode;
+}) {
+  const body = (
+    <View style={[styles.stepCard, highlight && styles.stepCardOn, { flexDirection: 'row', alignItems: 'center', gap: space.sm }]}>
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={styles.stepTitle}>
+          {title}
+          {optional ? <Text style={{ fontWeight: '500', color: colors.muted }}> (optional)</Text> : null}
+        </Text>
+        <Text style={styles.stepNote}>{note}</Text>
+        {children ? <View style={{ marginTop: space.sm }}>{children}</View> : null}
+      </View>
+      {action ? <Text style={{ fontSize: 14, fontWeight: '700', color: colors.primary }}>{action}</Text> : null}
+      {onPress ? <Ionicons name="chevron-forward" size={18} color={action ? colors.primary : colors.muted} /> : null}
+    </View>
+  );
+  if (!onPress) return body;
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" style={({ pressed }) => (pressed ? { opacity: 0.6 } : undefined)}>
+      {body}
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  title: { fontSize: 20, fontWeight: '800', color: colors.text },
+  muted: { fontSize: 14, color: colors.muted, marginTop: 4 },
+  dot: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  line: { flex: 1, width: 2, backgroundColor: colors.border, minHeight: 12, marginTop: 2 },
+  stepCard: { backgroundColor: colors.card, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, paddingVertical: 12, paddingHorizontal: 14 },
+  stepCardOn: { borderWidth: 2, borderColor: colors.primary },
+  stepTitle: { fontSize: 15, fontWeight: '700', color: colors.text },
+  stepNote: { fontSize: 13, color: colors.muted },
+});

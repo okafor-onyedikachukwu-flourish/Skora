@@ -5,6 +5,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View, useWindowDimensio
 import { DateField } from '../../../components/DateField';
 import { PageCrop, PageView } from '../../../components/PageCrop';
 import { QuestionCrop } from '../../../components/QuestionCrop';
+import { PassBadge, ScoreRing } from '../../../components/scores';
 import { colors, radius, space } from '../../../components/theme';
 import { Banner, Button, Card, Chip, EmptyState, ErrorView, Field, Input, LoadingView, Screen, SectionTitle, confirm } from '../../../components/ui';
 import { getExam, getKey, type Exam, type KeyRow } from '../../../lib/db/exams';
@@ -279,22 +280,30 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
     <Screen>
       <Stack.Screen options={{ title: pending.queueId !== undefined ? 'Waiting script' : 'Result' }} />
 
-      <Card>
-        <Text style={styles.score}>
-          {formatMarks(score)} <Text style={styles.outOf}>of {maxScore}</Text>
-        </Text>
-        <Text style={{ fontSize: 15, color: colors.text, marginTop: 2 }}>
-          {maxScore > 0 ? `${percent}% · ${right} of ${keyRows.length} correct` : 'Set the answer key to see the score.'}
-        </Text>
-        <Text style={{ fontSize: 14, color: unsure.length ? colors.warning : colors.muted, marginTop: 4 }}>
-          {[unsure.length ? `${unsure.length} to check` : 'Nothing to check', blanks ? `${blanks} left blank` : ''].filter(Boolean).join(' · ')}
-        </Text>
-        {handwritten ? (
-          <Text style={{ fontSize: 13, color: colors.muted, marginTop: 4 }}>
-            {readBy === 'both' ? 'Read by the phone and Gemini.' : readBy === 'gemini' ? 'Read by Gemini.' : 'Read by the phone.'}
-            {unsure.length ? ' The score counts only the answers read so far.' : ''}
+      <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+        {maxScore > 0 ? <ScoreRing percent={percent} size={84} /> : null}
+        <View style={{ flex: 1 }}>
+          <Text style={styles.score}>
+            {formatMarks(score)} <Text style={styles.outOf}>of {maxScore}</Text>
           </Text>
-        ) : null}
+          {maxScore > 0 ? (
+            <View style={{ marginTop: 4 }}>
+              <PassBadge pass={percent >= (settings?.passMarkPercent ?? 50)} />
+            </View>
+          ) : null}
+          <Text style={{ fontSize: 14, color: colors.text, marginTop: 6 }}>
+            {maxScore > 0 ? `${right} of ${keyRows.length} correct` : 'Set the answer key to see the score.'}
+          </Text>
+          <Text style={{ fontSize: 14, color: unsure.length ? colors.warning : colors.muted, marginTop: 2, fontWeight: unsure.length ? '600' : '400' }}>
+            {[unsure.length ? `${unsure.length} to check` : 'Nothing to check', blanks ? `${blanks} left blank` : ''].filter(Boolean).join(' · ')}
+          </Text>
+          {handwritten ? (
+            <Text style={{ fontSize: 13, color: colors.muted, marginTop: 2 }}>
+              {readBy === 'both' ? 'Read by the phone and Gemini.' : readBy === 'gemini' ? 'Read by Gemini.' : 'Read by the phone.'}
+              {unsure.length ? ' The score counts only the answers read so far.' : ''}
+            </Text>
+          ) : null}
+        </View>
       </Card>
 
       {gemini?.state === 'asking' ? (
@@ -488,7 +497,7 @@ function Result({ exam, keyRows, subjects, pending }: { exam: Exam; keyRows: Key
           </Field>
         ) : null}
         <Button
-          title="Save"
+          title={pending.queueId === undefined ? 'Save and scan the next one' : 'Save'}
           icon="checkmark"
           onPress={() => save()}
           loading={busy}

@@ -1,6 +1,6 @@
 # Skora's reader model
 
-A small model (about 300 KB) that reads one handwritten character from an answer script, on the
+A small model (about 500 KB) that reads one handwritten character from an answer script, on the
 phone and without internet. It reads the digits 0–9 and the letters A–E (capital or small), and
 it also says when a cut-out is something else, or is crossed out.
 
@@ -17,9 +17,8 @@ Actions → **Train reader model** → Run workflow. On GitHub's computers it:
 2. turns each character into what a phone photo of a script looks like (`synth.py`): any paper
    shade, shadows, foolscap rule lines, blue or black ink, thick or thin pens, slant, blur, phone
    JPEG, loose or tight cut-outs, a full stop beside it, crossings-out;
-3. trains the model (`train.py`) on a fresh set of examples every round (made while the previous
-   round trains, so it does not learn one set of pictures by heart), and tests it on characters
-   it never saw;
+3. trains the model (`train.py`) on a fresh set of examples every round (so it does not learn
+   one set of pictures by heart), and tests it on characters it never saw;
 4. only if letters (A–E and A–D) and digits are each at least 98% right, saves it into the app
    (`modules/skora-text/android/src/main/assets/skora-reader.tflite`, with `report.json` and
    `src/lib/reader/modelInfo.json`) and commits it.

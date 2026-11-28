@@ -89,8 +89,8 @@ def build_set(x, y, per_class: int, n_other: int, n_crossed: int, seed: int, wor
 
 
 class Maker:
-    """Makes sets of examples in worker processes, so the next round's set can be made while the
-    model trains on this one. Start it before TensorFlow is imported (the workers are forked)."""
+    """Makes sets of examples in worker processes that stay open for the whole training run.
+    Start it before TensorFlow is imported (the workers are forked)."""
 
     def __init__(self, workers: int):
         self.pool = mp.Pool(workers)
@@ -109,35 +109,6 @@ class Maker:
         self.pool.join()
 
 
-def Rounds(first, make_next, epochs: int, batch: int = 256):
-    """The training data, a fresh set for every round: other characters from EMNIST, and new
-    paper, pens, blur and cut-outs. With one set seen ten times the model learnt those exact
-    pictures by heart (98% right on them, but 95% on the test characters). The next round's set
-    is made in the background while the model trains on this one."""
-    from tensorflow import keras
-
-    class _Rounds(keras.utils.PyDataset):
-        def __init__(self):
-            super().__init__()
-            self.x, self.y = first
-            self.round = 0
-            self.upcoming = make_next(1) if epochs > 1 else None
-
-        def __len__(self):
-            return int(np.ceil(len(self.y) / batch))
-
-        def __getitem__(self, i):
-            return self.x[i * batch:(i + 1) * batch], self.y[i * batch:(i + 1) * batch]
-
-        def on_epoch_begin(self):  # Keras calls this once at the start of every round
-            if self.round > 0 and self.upcoming is not None:
-                self.x, self.y = Maker.get(self.upcoming)
-                self.upcoming = make_next(self.round + 1) if self.round + 1 < epochs else None
-            self.round += 1
-
-    return _Rounds()
-
-
 def build_model(n_classes: int):
     import tensorflow as tf
     from tensorflow import keras
@@ -145,13 +116,16 @@ def build_model(n_classes: int):
 
     inp = keras.Input((32, 32, 1))
     x = layers.Rescaling(1 / 255.0)(inp)
-    for filters in (24, 48, 96):
+    # Wider at the small 8 x 8 and 4 x 4 stages, which are cheap to train: with a fresh set every
+    # round the 24-48-96-128 model no longer learnt by heart, it ran out of room (95% right on
+    # both its own sets and the test set).
+    for filters in (24, 48, 128):
         for _ in range(2):
             x = layers.Conv2D(filters, 3, padding="same", use_bias=False)(x)
             x = layers.BatchNormalization()(x)
             x = layers.ReLU()(x)
         x = layers.MaxPooling2D()(x)
-    x = layers.Conv2D(128, 3, padding="same", use_bias=False)(x)
+    x = layers.Conv2D(192, 3, padding="same", use_bias=False)(x)
     x = layers.BatchNormalization()(x)
     x = layers.ReLU()(x)
     x = layers.GlobalAveragePooling2D()(x)
@@ -189,7 +163,7 @@ def main():
     ap.add_argument("--fake", action="store_true", help="typed fonts instead of EMNIST, to test the code quickly")
     ap.add_argument("--per-class", type=int, default=14000)
     ap.add_argument("--test-per-class", type=int, default=1500)
-    ap.add_argument("--epochs", type=int, default=10)
+    ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--min-letters", type=float, default=0.98)
     ap.add_argument("--min-digits", type=float, default=0.98)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
@@ -214,7 +188,19 @@ def main():
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
         metrics=["accuracy"],
     )
-    model.fit(Rounds((x, y), train_set, args.epochs), epochs=args.epochs, validation_data=(vx, vy), verbose=2)
+    # Every round learns from a fresh set: other characters from EMNIST, and new paper, pens,
+    # blur and cut-outs. With one set seen ten times the model learnt those exact pictures by
+    # heart (98% right on them, but 95% on the test characters). Each set is made between rounds:
+    # making it while the model trains slows both down (they share the same few CPU cores).
+    for r in range(args.epochs):
+        t0 = time.time()
+        if r > 0:
+            x, y = Maker.get(train_set(r))
+        t1 = time.time()
+        h = model.fit(x, y, batch_size=256, initial_epoch=r, epochs=r + 1, validation_data=(vx, vy), verbose=0).history
+        print(f"Round {r + 1}/{args.epochs} - new set {t1 - t0:.0f}s, training {time.time() - t1:.0f}s"
+              f" - accuracy: {h['accuracy'][-1]:.4f} - val_accuracy: {h['val_accuracy'][-1]:.4f}"
+              f" - val_loss: {h['val_loss'][-1]:.4f}", flush=True)
     maker.close()
 
     keras_metrics = metrics(model.predict(vx, batch_size=1024, verbose=0), vy)
